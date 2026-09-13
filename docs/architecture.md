@@ -1,143 +1,157 @@
-# Frame video analyzer — high-level design (HLD)
+# Frame — frontend and backend architecture
 
-**Status:** implemented local system plus clearly marked target architecture
+> **High-level design (HLD)** · Deployment decision: Docker + Kubernetes on an Ubuntu GPU host, with host storage.
+> The application behavior below exists today. Container packaging and Kubernetes resources described here are the agreed deployment design; they have not yet been added to this repository.
 
-**Scope:** browser UI, public FastAPI service, persisted media and metadata, and the planned boundary to a separate internal algorithm service
+Frame has two responsibilities: let a user upload a video and continue its conversation, and keep that user's files and messages connected to the right session. This document explains those responsibilities and where they run.
 
-**Detailed design:** [frontend and API LLD](design/frontend-design.md)
-
-## 1. Purpose and boundaries
-
-Frame lets an authenticated user create conversations, upload one video per conversation, add reference images to follow-up questions, and see a response. A session is identified by `jobs.id`; each session references exactly one `uploads.id`. Multiple sessions and uploads may belong to the same user. The current response engine answers only stored metadata questions. Video detection, image understanding, and the agent are **not implemented in this repository**.
-
-The public backend owns identity, authorization, upload coordination, sessions, chat history, and browser-visible media URLs. A future algorithm service will own media analysis and agent execution in a separate project. The browser must never call that internal service directly.
-
-## 2. Quality goals and constraints
-
-| Concern | Current design | Target for multi-instance production |
-| --- | --- | --- |
-| Large media | Browser sends 8 MiB chunks; server streams each request to local disk; configured video limit is 250 GiB | Resumable multipart upload to shared object storage; capacity, retention, and quotas defined operationally |
-| Concurrent sessions | Distinct upload IDs have separate in-process locks; one video receives ordered chunks | Coordination must survive multiple API processes and hosts |
-| Durability | SQLite holds records; `data/` holds media; no automated backup or retention policy | Shared relational database, durable media storage, backups, lifecycle policy |
-| Processing | FastAPI background task computes SHA-256 and optional `ffprobe` duration | Durable queue and independent workers; internal algorithm service consumes storage keys |
-| Identity | HttpOnly session cookie, CSRF token, per-user ownership checks | HTTPS termination, secrets management, rate limiting, audit and monitoring |
-| Recovery | Saved upload offset supports retry; pending preprocessing is resumed on process startup | Idempotent work, retries, dead-letter handling, explicit job state transitions |
-
-These are design goals, not claims that the target features already exist. No throughput or availability SLA has been measured.
-
-## 3. System context
-
-```mermaid
-flowchart LR
-    User[Authenticated user] -->|UI, upload, chat| Frame[Frame public web system]
-    Admin[Local administrator] -->|CLI account and cleanup commands| Frame
-    Frame -. future authenticated internal calls .-> Algo[Separate algorithm and agent service]
-    Algo -. future media reads and results .-> Shared[(Shared media storage)]
-```
-
-The algorithm service is a separate trust boundary. It must use service authentication and private connectivity; a browser session cookie is not an internal-service credential.
-
-## 4. Container view
-
-### 4.1 Implemented local deployment
-
-```mermaid
-flowchart LR
-    Browser[Browser: HTML, CSS, JavaScript] -->|same-origin HTTP API| API[FastAPI process]
-    API -->|static files| Browser
-    API -->|SQL| DB[(SQLite: data/frame.sqlite3)]
-    API -->|read and write| Media[(Local disk: data/videos, data/images)]
-    API -->|in-process background task| Prep[Metadata preparation: SHA-256, ffprobe]
-    Prep --> DB
-    Prep --> Media
-```
-
-`main.py` mounts the frontend and API in one process. SQLite and media files are local to that host. This deployment should run as a **single API process** unless storage and upload coordination are redesigned. A per-upload Python lock does not coordinate separate workers or machines. Synchronous file writes and `fsync` can briefly block the event loop. Local preprocessing uses an API background task, so it is not a durable distributed job queue.
-
-### 4.2 Target deployment — planned, not implemented
-
-```mermaid
-flowchart LR
-    Browser[Browser] -->|HTTPS| Edge[Static host / reverse proxy]
-    Edge -->|/api| API[Public FastAPI replicas]
-    Browser -->|authorized multipart upload| Store[(Object storage)]
-    API -->|metadata and ownership| PG[(Shared SQL database)]
-    API -->|enqueue session ID| Queue[(Durable queue)]
-    Queue --> Worker[Backend worker]
-    Worker -->|service-authenticated request| Algo[Internal algorithm service]
-    Algo -->|read video and images; write results| Store
-    Worker -->|save status and response| PG
-```
-
-The public API authorizes uploads and issues limited storage access. The browser transfers video bytes to storage. The worker passes references, not the full video body, to the algorithm service. The public API remains the only source of browser-visible session status and owner-checked result URLs. Exact storage, queue, database provider, and internal endpoints remain design decisions.
-
-## 5. Data ownership and mapping
-
-```mermaid
-erDiagram
-    USERS ||--o{ AUTH_SESSIONS : signs_in
-    USERS ||--o{ UPLOADS : owns
-    UPLOADS ||--o| JOBS : creates_one_session
-    JOBS ||--o{ MESSAGES : contains
-    JOBS ||--o{ IMAGES : owns
-    MESSAGES |o--o{ IMAGES : attaches
-```
-
-| Record | Primary key | Link and responsibility |
-| --- | --- | --- |
-| `users` | `id` | Account and password hash |
-| `auth_sessions` | `token_hash` | `user_id`; expiring login and CSRF state |
-| `uploads` | `id` | `user_id`; filename, byte count, committed offset, transfer status |
-| `jobs` | `id` = `session_id` | `upload_id` is unique; entities, instructions, preparation status and metadata |
-| `messages` | integer `id` | `job_id`; ordered user and assistant text |
-| `images` | `id` | `session_id`; stored filename and optional `message_id` |
-
-Video bytes live at `data/videos/{upload_id}.part` during transfer and `data/videos/{upload_id}.video` after completion. Image bytes live at `data/images/{session_id}/{stored_name}`. Paths are server-side implementation details; clients receive API IDs and authorized image URLs. SQLite contains references and metadata, not the media bodies. The backend derives a future algorithm request by joining `jobs` to `uploads` and selecting images for the same session/message.
-
-## 6. Critical journeys
-
-| Journey | Current behavior | Detailed flow |
-| --- | --- | --- |
-| Sign in and restore | Cookie authenticates; backend lists only owned jobs | [LLD: identity](design/frontend-design.md#4-identity-and-authorization) |
-| Upload and create session | Resume by committed offset; complete file; create one job per upload | [LLD: video transfer](design/frontend-design.md#5-video-transfer-and-session-creation) |
-| Prepare and notify | Hash and optional duration; poll status until ready/failed | [LLD: preparation](design/frontend-design.md#6-preparation-and-status) |
-| Follow-up question with images | Validate and store images, attach to a message, return metadata-based answer | [LLD: chat](design/frontend-design.md#7-chat-and-image-flow) |
-
-**State meaning:** `ready` currently means metadata preparation finished. It does not imply video detection or image matching. The browser's completion notification is a toast and, if permission was granted and the page is open, a browser notification; there is no server push or offline push service.
-
-## 7. External and internal interfaces
-
-The implemented same-origin `/api` surface is documented in the [LLD endpoint matrix](design/frontend-design.md#3-interface-contracts). All protected calls require a valid session cookie; modifying calls also require `X-CSRF-Token`. Ownership is checked before returning an upload, job, message, or image. The static frontend is served at `/`.
-
-The following is a **proposed integration contract**, not a current endpoint:
-
-```json
-{
-  "session_id": "<job UUID>",
-  "video_key": "videos/<upload UUID>.video",
-  "image_keys": ["images/<session UUID>/<stored name>"],
-  "question": "Is this person in the video?"
-}
-```
-
-The public backend must derive these keys from owner-checked database records; the browser must not supply arbitrary storage paths. The algorithm service should return structured answer, timestamps, result-image keys, and task status. The public backend will persist those as session messages and serve result images through authorized URLs. Service credential, request schema, idempotency key, callback/polling choice, and retry policy are still open design items.
-
-## 8. Deployment, operations, and risks
-
-For the current local deployment, persist and back up the whole `data/` directory, run a single API process, and terminate HTTPS at a reverse proxy for remote access. Monitor disk free space and failed jobs; a 24-hour upload can consume substantial disk and I/O. `cleanup_data.py` previews or resets database-linked media and session records, but it is a manual maintenance command and not a retention scheduler. Stop the API before running it.
-
-Before scaling to multiple API instances, replace local media storage and in-process upload locks, move metadata to a shared server database, and move processing to durable workers. Add operational tests for interrupted uploads, restart recovery, concurrent writers, capacity exhaustion, backup restoration, and authorization across sessions. The current automated tests cover authentication, session ownership, concurrent uploads, and cleanup behavior; they do not establish production capacity.
-
-## 9. Source of truth
-
-| Area | Implementation |
+| Start here | What you will find |
 | --- | --- |
-| App assembly and static mount | `main.py` |
-| Auth and ownership middleware | `backend/auth.py` |
-| SQLite schema and connection | `backend/db.py` |
-| Upload protocol and storage | `backend/uploads.py`, `backend/config.py` |
-| Session creation and metadata | `backend/jobs.py`, `backend/video_metadata.py` |
-| Image and chat endpoints | `backend/images.py`, `backend/chat.py` |
-| Browser behavior | `frontend/script.js` |
+| **This HLD** | System view, responsibilities, deployment, and storage ownership |
+| [Frontend LLD](design/frontend-design.md) | Screenshots, user interactions, browser states, and UI call chains |
+| [Backend LLD](design/backend-design.md) | API contracts, processing sequences, data mapping, and class diagrams |
 
-Diagram levels follow the [C4 model](https://c4model.com/diagrams); Mermaid provides the notation. Source code remains authoritative if a document becomes stale.
+**On this page:** [User journey](#1-the-user-journey) · [Architecture](#2-the-architecture) · [Responsibilities](#3-who-does-what) · [Host storage](#4-where-the-data-lives) · [Kubernetes](#5-docker-and-kubernetes-deployment) · [Recovery](#6-restarts-and-recovery) · [Decisions](#7-design-decisions-and-verification)
+
+## 1. The user journey
+
+```mermaid
+flowchart LR
+    SignIn["1. Sign in"] --> Video["2. Select a video<br/>Add prompt and entities"]
+    Video --> Transfer["3. Upload<br/>Watch progress"]
+    Transfer --> Prepare["4. Prepare on server<br/>Wait for ready status"]
+    Prepare --> Chat["5. Continue chat<br/>Attach images to questions"]
+```
+
+- **One conversation = one video.** Follow-up questions and images stay with that conversation.
+- **More than one upload can run.** New conversation opens another upload form while earlier transfers continue.
+- **Saved work survives refresh and login.** The backend keeps completed sessions and their messages. An interrupted transfer resumes after the user selects the same file again.
+- **Current preparation is metadata only.** It computes a checksum and optional video duration. Current chat answers metadata questions; recognition is not connected.
+
+## 2. The architecture
+
+Solid arrows show the frontend/backend data path. The dotted arrow reserves a future connection only.
+
+```mermaid
+flowchart TB
+    Browser["User's browser<br/>Frontend runs here"]
+    subgraph Cluster["Kubernetes cluster"]
+        Entry["HTTPS entry point<br/>Ingress controller"]
+        Service["Frame Service<br/>ClusterIP"]
+        subgraph Node["Ubuntu GPU host / Kubernetes node"]
+            subgraph Pod["Frame Pod — one application container"]
+                Static["Frontend assets<br/>HTML · CSS · JavaScript"]
+                API["FastAPI backend<br/>Auth · Uploads · Sessions · Chat"]
+                Static --- API
+            end
+            Volume["PersistentVolumeClaim<br/>Mounted at /data"]
+            Host[("Host disk<br/>SQLite · Videos · Images")]
+            Multiagent["Multiagent Service<br/>Separate container · GPU or Claude API"]
+        end
+    end
+    Browser <-->|"HTTPS: pages, uploads, chat"| Entry
+    Entry --> Service
+    Service --> API
+    API -->|"read and write"| Volume
+    Volume ---|"local PersistentVolume"| Host
+    API -. "future connection" .-> Multiagent
+    classDef app fill:#e8f3ff,stroke:#2563eb,color:#172554
+    classDef storage fill:#e9f7ef,stroke:#258459,color:#14532d
+    classDef deferred fill:#f4f4f5,stroke:#71717a,color:#52525b,stroke-dasharray:5 5
+    class Static,API app
+    class Volume,Host storage
+    class Multiagent deferred
+```
+
+The frontend and backend remain separate source folders. The application image packages both because [main.py](../main.py) already serves the frontend and `/api` from one FastAPI app. The browser uses one origin for cookies, API requests, and images. The deployment runs on an Ubuntu machine with a GPU. Multiagent design and development will have their own folder later; this document reserves only its separate-container box, with the requested GPU execution or Claude API fallback.
+
+## 3. Who does what
+
+| Responsibility | Frontend | Backend |
+| --- | --- | --- |
+| Sign in | Collect credentials, restore the workspace | Check credentials, issue session cookie, enforce ownership |
+| Video transfer | Slice the file into 8 MiB requests; show each draft's progress | Check offsets and limits; stream bytes to host storage |
+| Conversation | Select the visible session; keep background drafts running | Create a unique session linked to one completed upload |
+| Preparation | Poll the selected session; show its status | Compute SHA-256 and optional duration; persist ready/failed |
+| Follow-up images | Preview images beside the question; send on Submit | Validate image bytes; attach image records to that message |
+| Conversation history | Render text and protected image URLs | Persist and return only the signed-in user's session data |
+| Maintenance | No maintenance UI | Administrator uses account and cleanup scripts |
+
+The browser handles presentation and transfer. File validation, storage, metadata preparation, and access checks belong to the backend.
+
+## 4. Where the data lives
+
+The database is currently **SQLite**, so “database on the host” means its database file stays on the host disk. There is no separate database server in this design. Mount the entire data directory into the application container; SQLite must also be able to write its journal files there.
+
+| Data | Example path on the Kubernetes host | Path used by FastAPI |
+| --- | --- | --- |
+| Database and journals | `/srv/frame/data/frame.sqlite3` and related files | `/data/frame.sqlite3` |
+| Video being uploaded | `/srv/frame/data/videos/{upload_id}.part` | `/data/videos/{upload_id}.part` |
+| Completed video | `/srv/frame/data/videos/{upload_id}.video` | `/data/videos/{upload_id}.video` |
+| Chat image | `/srv/frame/data/images/{session_id}/{stored_name}` | `/data/images/{session_id}/{stored_name}` |
+
+Set **`FRAME_DATA_DIR=/data`** in the application container. The host path above is a deployment example; the existing local default is the repository's `data/` directory. Preserve the current directory contents when moving to the mounted path. Do not bake user data into the Docker image or use the container's writable layer for it.
+
+The mapping is:
+
+```text
+User
+ └─ Upload record ──────────────── Video file
+     └─ Conversation (job ID = session ID)
+         ├─ Messages
+         └─ Image records ──────── Image files
+              └─ message ID identifies the attached question
+```
+
+IDs and metadata live in SQLite; the video and image bytes live in files. See the [data model and class diagram](design/backend-design.md#6-data-model-and-class-diagrams) for exact relationships.
+
+## 5. Docker and Kubernetes deployment
+
+These are deployment settings to implement, not a report of resources currently running.
+
+| Resource | Selected design | Reason |
+| --- | --- | --- |
+| Application image | Python runtime, requirements, `main.py`, `backend/`, `frontend/`; include `ffprobe` for duration | Package the existing application and its runtime tools |
+| Application process | `uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1`; no `--reload` | Upload locks and preparation ownership currently belong to one process |
+| Compute host | Ubuntu Kubernetes node with persistent host disk and GPU hardware | Frontend/backend run on CPU; they do not reserve GPU devices or need CUDA for current behavior |
+| Deployment | One replica; `Recreate` update strategy | Avoid old/new application pods overlapping during normal upgrades; upgrades cause a brief outage |
+| Service | ClusterIP targeting port 8000 | Stable route to the application pod |
+| HTTPS entry | Ingress and an installed controller; same hostname for `/` and `/api` | Serve the UI, cookies, and API through one origin |
+| Data volume | Static **local PersistentVolume**, matching PVC, mounted at `/data` | Keep the database, videos, and images on the selected host |
+| Volume placement | PV `nodeAffinity`; StorageClass `kubernetes.io/no-provisioner` with `WaitForFirstConsumer` | Schedule the pod where its host data exists |
+| Data lifecycle | PV reclaim policy `Retain`; host-directory permissions for the application user | Separate application replacement from data removal |
+| Availability checks | Use `/api/health` for basic process checks; add storage-aware readiness before release | Current health response does not test database or disk access |
+
+Local PVs require node affinity, and delayed binding allows Kubernetes to consider the pod's placement. A local volume remains tied to its node; Kubernetes does not copy it to another host. [Kubernetes local volumes](https://kubernetes.io/docs/concepts/storage/volumes/#local), [volume binding](https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode).
+
+`Recreate` stops old pods before replacements during a deployment update. It is not a distributed lock: do not manually run another backend or force-delete a pod whose process may still be writing. ReadWriteOnce also does not mean “one application writer.” [Kubernetes deployment strategy](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#recreate-deployment), [volume access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes).
+
+Configure the chosen ingress to accept **at least 20 MiB image bodies** and 8 MiB video chunks, with timeouts for each request and appropriate request buffering. A 24-hour video is many requests, not one day-long request. Trust forwarded HTTPS headers only from the ingress so FastAPI can set secure cookies correctly. Keep media routes behind FastAPI's ownership checks.
+
+**Host means the Ubuntu Kubernetes node filesystem.** `/srv/frame/data` is a Linux deployment path; the current Windows project directory is the development workspace. Exact Ubuntu version, node name, host directory, ingress implementation, disk capacity, and resource requests remain environment configuration. GPU allocation and Claude credentials belong to the deferred service configuration; they are not required to run the current frontend/backend.
+
+## 6. Restarts and recovery
+
+| Event | What survives | What the user or operator does |
+| --- | --- | --- |
+| Browser refresh | Saved database records and received video bytes | Reopen the session; reselect an interrupted video to resume |
+| Application container restart | Data on the mounted host directory | Browser retries interrupted transfers; startup reschedules unfinished metadata preparation |
+| Image / pod replacement | Same host data if the PVC is retained | Reattach the existing claim and keep the single-writer rule |
+| Storage host unavailable | Files remain tied to that host | Restore the host or recover from backup; automatic cross-node failover is not provided |
+| Manual cleanup | Accounts stay unless explicitly included | Stop the application, preview cleanup, then execute only the intended reset |
+
+The file system and SQLite are separate persistence operations. Recovery works for saved upload offsets, but the code does not provide an atomic transaction covering both files and database rows. Specific failure cases are recorded in the [backend recovery notes](design/backend-design.md#7-failure-handling-and-operational-limits).
+
+## 7. Design decisions and verification
+
+| Decision | Outcome |
+| --- | --- |
+| D1 — Frontend and backend own this design | Three focused documents: HLD, frontend LLD, backend LLD |
+| D2 — Docker images run on Kubernetes | Single application pod serves the existing frontend and backend |
+| D3 — Database and media stay on the host | SQLite and files persist through a local PV/PVC mount |
+| D4 — Keep one backend writer | One replica, one Uvicorn worker, controlled replacement |
+| D5 — Keep future scope small | One Multiagent Service box; its implementation and design are deferred |
+
+Before deploying, verify: the same user can reopen sessions after a pod replacement; two uploads can advance independently; ingress accepts the configured chunk/image sizes; cross-user media is denied; interrupted uploads resume; and a backed-up database plus media directory can be restored together. Current tests cover small concurrent transfers, ownership, chat/image mapping, and cleanup, not Kubernetes or 24-hour-file performance.
+
+For implementation details, continue with the [frontend LLD](design/frontend-design.md) or [backend LLD](design/backend-design.md).
