@@ -1,264 +1,291 @@
-# Frame frontend design and interaction flow
+# Frame frontend and public API — low-level design (LLD)
 
-This document describes the **current browser interface** in `frontend/` and its calls to the public FastAPI backend. It is a reference for UI changes and for integrating the separate algorithm service later. The screenshots below were captured from the running HTML/CSS/JavaScript on a 1440 px desktop viewport and a 390 px mobile viewport. Workspace screenshots use sample API data; no real user video or account is shown. The conversation image response is **illustrative**: the current backend does not generate detection results or assistant images.
+**Status:** documents implemented behavior unless a section is marked *planned*
 
-## Screens and screenshots
+**Parent:** [system HLD](../architecture.md)
 
-### Sign in
+**Code:** `frontend/`, `main.py`, `backend/`
 
-![Current sign-in screen](screenshots/login-current.png)
+## 1. Scope and UI evidence
 
-The sign-in screen has a product story on the left and a username/password form on the right. Password visibility can be toggled. **Remember me** is checked by default. Invalid credentials display an inline error without leaving the screen. Accounts are created by an administrator through `manage_users.py`; there is no self-registration UI. The original visual reference is [login-page.jpg](figma/login-page.jpg).
+This document specifies the browser state, public endpoint call chain, stored relationships, error handling, and the boundary to the future algorithm service. The browser only selects files, sends bytes, displays progress, and renders responses. Validation, persistence, and preparation run on the backend. It does not decode or analyze video.
 
-### New video workspace
+| Screen | Captured implementation | Notes |
+| --- | --- | --- |
+| Sign in | ![Current sign-in screen](screenshots/login-current.png) | Username/password, visibility toggle, remember-me; accounts are created through `manage_users.py` |
+| New conversation | ![Current workspace with a selected sample video](screenshots/workspace-current.png) | Video picker, entity filters, optional instructions, Analyze video |
+| Conversation | ![Illustrative conversation](screenshots/conversation-example.png) | **Mocked example** for response-image rendering; detection and generated result images are not implemented |
+| Mobile workspace | ![Current mobile workspace](screenshots/mobile-workspace-current.png) | Sample session data, narrow viewport |
 
-![Current workspace with a sample selected video](screenshots/workspace-current.png)
+The original visual references are [login-page.jpg](figma/login-page.jpg) and [home-page.jpg](figma/home-page.jpg). Captured screenshots may need regeneration after UI changes; the source files and endpoint behavior below are authoritative.
 
-The sidebar contains **New conversation**, the signed-in user's sessions, account name, and sign-out. The main card contains a video picker, five entity filters, optional instructions, and **Analyze video**. People and Cars are selected by default. Selecting a file shows its name and size. The original visual reference is [home-page.jpg](figma/home-page.jpg).
+## 2. Component and state design
 
-### Ready conversation and image response
+```mermaid
+flowchart LR
+    Page[frontend/index.html] --> Script[frontend/script.js]
+    Page --> CSS[styles.css and upload.css]
+    Script --> Auth[Auth/session UI]
+    Script --> Drafts[Upload draft manager]
+    Script --> Chat[Chat and image composer]
+    Auth --> API[api fetch wrapper]
+    Drafts --> API
+    Chat --> API
+    API --> Middleware[backend/auth.py]
+    Middleware --> Uploads[backend/uploads.py]
+    Middleware --> Jobs[backend/jobs.py]
+    Middleware --> Images[backend/images.py]
+    Middleware --> Messages[backend/chat.py]
+    Uploads --> DB[backend/db.py]
+    Jobs --> DB
+    Images --> DB
+    Messages --> DB
+```
 
-![Illustrative ready conversation showing an assistant image](screenshots/conversation-example.png)
+`frontend/script.js` is currently one browser module with functions and module-level state, not a class-based frontend framework. The diagram names logical responsibilities, not existing JavaScript classes. `main.py` registers routers and mounts static files last.
 
-This is a UI example with **mocked messages**. It demonstrates the conversation layout, user and assistant bubbles, an image inside an assistant bubble, the **+** image picker, and **Send**. The real chat endpoint currently answers only simple file-metadata questions; it does not identify objects or people in video and does not produce assistant images. The UI can render an image when a stored message includes an authorized image URL.
-
-### Mobile workspace
-
-![Current mobile workspace with a sample session](screenshots/mobile-workspace-current.png)
-
-On narrow screens, the sidebar becomes a top section. The session list remains horizontally scrollable and sign-out stays visible. The workspace, status card, and chat stack vertically. The mobile screenshot uses sample session data.
-
-## Screen states and controls
-
-| State | Visible behavior | User action | Next state |
-| --- | --- | --- | --- |
-| Signed out | Login form; workspace hidden | Enter credentials | Workspace, or inline error |
-| New conversation | Video picker, entity filters, instructions | Select a video and press **Analyze video** | Uploading |
-| Uploading | Percentage progress in the form and sidebar; Analyze disabled for that draft | Start another conversation, wait, or retry after an error | Preprocessing |
-| Preprocessing | Session ID, status text, disabled chat input | Leave page or wait | Ready or Failed |
-| Ready | Chat enabled, **Chat** button enabled, Analyze locked for this session | Send question and optional images | Ready with more messages |
-| Failed | Error shown in status card; chat unavailable | Start a new conversation | New conversation |
-
-Each session has **one video**. The **New conversation** button resets the composer for another session. Clicking a saved session opens its status and conversation. On refresh, the browser asks the backend for the signed-in user and their sessions, then reopens the last selected session if it still belongs to that user.
-
-Multiple uploads may run in the same tab. The sidebar keeps an in-progress draft for each video, with a separate file, prompt, entity selection, and percentage. Switching to **New conversation** leaves earlier transfers running. When an upload creates a job, its draft becomes a saved session. Browser refresh cannot retain a `File` object, so an interrupted transfer must be resumed by reselecting that file; the backend offset remains saved.
+| Browser state | Meaning and lifetime |
+| --- | --- |
+| `currentUser`, `csrfToken` | Signed-in identity and CSRF token, held in memory; password is never stored by the UI |
+| `currentFile` | Selected `File` object for the active unsaved conversation; lost on refresh |
+| `uploadDrafts`, `activeDraftId` | In-memory parallel transfer records; each holds file, prompt, selected entities, percentage, and status |
+| `activeJobId` | Saved conversation currently shown; chat and polling are scoped to it |
+| `pendingImages` | Local image previews and image IDs for the next chat message |
+| `frameUpload:{userId}:{name}:{size}:{lastModified}` | Local-storage upload ID for resuming the same selected file after interruption |
+| `frameLastJob:{userId}` | Local-storage UI preference for restoring the selected session |
 
 ```mermaid
 stateDiagram-v2
     [*] --> SignedOut
-    SignedOut --> NewConversation: successful login
-    SignedOut --> SignedOut: invalid login
+    SignedOut --> NewConversation: valid login or restored cookie
     NewConversation --> VideoSelected: choose video
     VideoSelected --> Uploading: Analyze video
-    Uploading --> VideoSelected: upload error / retry same file
-    Uploading --> Preprocessing: upload complete + session created
-    Preprocessing --> Ready: backend status ready
-    Preprocessing --> Failed: backend status failed
-    Ready --> Ready: send question or image
+    Uploading --> UploadFailed: transfer or job error
+    UploadFailed --> Uploading: retry same file
+    Uploading --> Preprocessing: complete upload and create job
+    Preprocessing --> Ready: metadata preparation succeeds
+    Preprocessing --> Failed: metadata preparation fails
+    Ready --> Ready: send question and optional images
     Ready --> NewConversation: New conversation
     Failed --> NewConversation: New conversation
-    NewConversation --> SignedOut: sign out
-    Ready --> SignedOut: sign out
-    Failed --> SignedOut: sign out
 ```
 
-## Identity and session mapping
+Opening **New conversation** while a draft is uploading only changes the visible composer. The earlier draft remains in `uploadDrafts` and its upload continues in the same tab. A completed background draft becomes a saved session without taking focus from the current view. The same file cannot be started twice concurrently under the same user/file key. Signing out is blocked while an upload is active. A browser refresh loses `File` objects; the user must reselect the file to resume from the persisted server offset.
 
-The browser calls `GET /api/me` on page load. If the server session cookie is valid, it calls `GET /api/jobs` and renders only that user's sessions. `POST /api/auth/login` sets an HttpOnly cookie and returns a CSRF token; the JavaScript keeps the CSRF token in memory and sends it as `X-CSRF-Token` on modifying API calls. Fetch uses same-origin credentials. Signing out calls `POST /api/auth/logout`, which revokes the server session and clears the cookie.
+## 3. Interface contracts
 
-| Identifier | Created by | Purpose |
-| --- | --- | --- |
-| User ID | Account administration | Owns uploads and their sessions |
-| Upload ID | `POST /api/uploads` | Resumable transfer record and video file name |
-| Job ID / Session ID | `POST /api/jobs` | One video, preprocessing status, and chat history |
-| Image ID | `POST /api/sessions/{session_id}/images` | Stored image attached to a chat message |
-| Message ID | Chat endpoint | Orders user and assistant messages |
+All paths are same-origin. Except health, login, and `/api/me`, protected calls require a valid cookie; writes also require `X-CSRF-Token`. The ownership middleware scopes access to a user's uploads and their jobs/images/messages. Error responses use an HTTP status plus `detail`.
 
-The browser stores **no password or auth token** in local storage. It stores `frameLastJob:{user_id}` as a UI preference and `frameUpload:{user_id}:{filename}:{size}:{lastModified}` to resume an interrupted upload. The backend validates ownership on every protected upload, job, message, and image route; a saved ID alone cannot grant access.
+| Method and path | Request | Successful result | Owner/guard |
+| --- | --- | --- | --- |
+| `POST /api/auth/login` | username, password, remember | user ID, username, CSRF token; HttpOnly cookie | credentials and active account |
+| `GET /api/me` | cookie | current user and CSRF token | valid login |
+| `POST /api/auth/logout` | cookie and CSRF | signed out | valid login |
+| `GET /api/jobs` | cookie | owned session list | user ID |
+| `POST /api/uploads` | filename, total size | upload ID, offset 0, chunk size | valid user; `0 < size <= 250 GiB` |
+| `GET /api/uploads/{id}` | upload ID | saved offset, size, status | upload owner |
+| `PATCH /api/uploads/{id}` | binary body, `Upload-Offset` | committed offset | owner, status, exact offset, chunk and total size |
+| `POST /api/uploads/{id}/complete` | upload ID | status complete | owner; saved bytes equal declared size |
+| `POST /api/jobs` | upload ID, entities, instructions | job/session ID, preprocessing status | owner; complete upload; one job per upload |
+| `GET /api/jobs/{id}` | session ID | status, entities, metadata/error | session owner |
+| `GET /api/jobs/{id}/messages` | session ID | ordered messages and image URLs | session owner |
+| `POST /api/sessions/{id}/images` | image bytes and `X-Filename` | image ID and protected URL | session owner; supported type and <= 20 MiB |
+| `GET /api/sessions/{id}/images/{imageId}` | IDs | image bytes | session owner and matching image |
+| `POST /api/jobs/{id}/messages` | content, up to 10 image IDs | saved user and assistant messages | ready session; images belong to it and are unattached |
+
+Pydantic request models and limits are in `backend/schemas.py`. Uploads accept People, Cars, Motorcycles, Bicycles, or Animals as entity values. See FastAPI `/docs` for the generated request/response view, but note that image and upload bodies are handled directly from `Request` streams.
+
+## 4. Identity and authorization
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as Browser UI
-    participant Auth as FastAPI auth
+    participant UI as Browser
+    participant Auth as Auth router and middleware
     participant DB as SQLite
     User->>UI: Open page
-    UI->>Auth: GET /api/me (session cookie)
-    Auth->>DB: Validate session and active user
-    alt Valid session
-        Auth-->>UI: user ID, username, CSRF token
+    UI->>Auth: GET /api/me with cookie
+    Auth->>DB: Look up token hash, expiry, active user
+    alt Valid cookie
+        Auth-->>UI: user and CSRF token
         UI->>Auth: GET /api/jobs
-        Auth->>DB: List jobs owned by user
-        DB-->>Auth: This user's sessions
-        Auth-->>UI: Session list
-        UI-->>User: Restore workspace and selected session
-    else No valid session
+        Auth->>DB: Query jobs joined to owned uploads
+        Auth-->>UI: owned sessions
+    else No valid cookie
         Auth-->>UI: 401
-        UI-->>User: Show sign-in screen
+        UI-->>User: Show sign-in form
     end
-    User->>UI: Sign in
+    User->>UI: Submit credentials
     UI->>Auth: POST /api/auth/login
-    Auth->>DB: Verify password and create server session
-    Auth-->>UI: HttpOnly cookie + user + CSRF token
+    Auth->>DB: Verify password and create auth session
+    Auth-->>UI: HttpOnly cookie and CSRF token
 ```
 
-## Video upload and preprocessing call chain
+The cookie contains an opaque token; SQLite stores only its SHA-256 hash. Login sets `SameSite=Strict` and `HttpOnly`; the `Secure` flag is set when the request scheme is HTTPS. Session lifetime is 12 hours without remember-me or 7 days with it. The browser sends the CSRF token on mutations. Missing or cross-user IDs return 404 on protected media/session routes, reducing ID-based disclosure. Password hashes use `pwdlib`'s recommended scheme. There is no user self-registration or API rate limiting in the current implementation.
 
-The browser splits a selected file into **8 MiB transfer chunks**. It does not decode or analyze video content. The backend writes the bytes to `data/videos/{upload_id}.part`, then renames that file to `{upload_id}.video` after the expected byte count arrives. Metadata and ownership live in `data/frame.sqlite3`. The configured maximum video size is **250 GiB**.
-
-| Step | Browser call | Backend handler | Result |
-| --- | --- | --- | --- |
-| Start or resume | `GET /api/uploads/{upload_id}` if a saved ID exists; otherwise `POST /api/uploads` with `filename` and `size` | `backend/uploads.py` | Upload ID, current offset, chunk size |
-| Transfer | `PATCH /api/uploads/{upload_id}` with `Upload-Offset` and binary chunk | `backend/uploads.py` | New committed offset |
-| Finish transfer | `POST /api/uploads/{upload_id}/complete` | `backend/uploads.py` | Complete video file |
-| Create session | `POST /api/jobs` with `upload_id`, `entities`, `instructions` | `backend/jobs.py` | Job/session ID, `preprocessing` |
-| Check progress | `GET /api/jobs/{job_id}` every 3 seconds while processing | `backend/jobs.py` | `preprocessing`, `ready`, or `failed` |
+## 5. Video transfer and session creation
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as Browser UI
-    participant API as Public FastAPI
-    participant Disk as Video storage
+    participant UI as Browser uploadVideo/runUpload
+    participant API as Upload and job routers
+    participant Disk as data/videos
     participant DB as SQLite
-    participant Prep as Local preprocessing
-    User->>UI: Select video, entities, instructions
+    User->>UI: Select file, entities, instructions
     UI->>API: POST /api/uploads {filename, size}
-    API->>DB: Create upload owned by user
-    API-->>UI: upload_id, offset=0, chunk_size
-    loop Until offset equals file size
-        UI->>API: PATCH /api/uploads/{id} (binary chunk, Upload-Offset)
-        API->>Disk: Append and sync chunk
-        API->>DB: Save new offset
-        API-->>UI: offset
-        UI-->>User: Update percentage
+    API->>DB: Insert upload with offset 0 and owner
+    API->>Disk: Create UUID.part
+    API-->>UI: upload ID and 8 MiB chunk size
+    loop Sequential chunks for this video
+        UI->>API: PATCH /api/uploads/{id} with Upload-Offset and file slice
+        API->>Disk: Stream, truncate to committed offset, write, flush, fsync
+        API->>DB: Commit new offset
+        API-->>UI: new offset
     end
     UI->>API: POST /api/uploads/{id}/complete
-    API->>Disk: Rename .part to .video
-    API-->>UI: status=complete
+    API->>Disk: Verify size and rename to UUID.video
+    API->>DB: Mark upload complete
     UI->>API: POST /api/jobs {upload_id, entities, instructions}
-    API->>DB: Create one job for this upload
-    API-->>UI: session_id, status=preprocessing
-    API->>Prep: Calculate SHA-256; run ffprobe if available
-    Prep->>DB: Save metadata and ready/failed status
-    loop Every 3 seconds while processing
-        UI->>API: GET /api/jobs/{session_id}
-        API-->>UI: status, metadata or error
-    end
-    UI-->>User: Ready notification and enabled chat
+    API->>DB: Insert one job for upload
+    API-->>UI: job ID = session ID
 ```
 
-For a lost chunk response, the browser requests the upload's stored offset and continues from that offset. If transfer finishes but the session-creation response is lost, the browser reuses the completed upload and looks for its session in `GET /api/jobs`, avoiding a second large transfer. A session's **Analyze video** button remains locked once a job exists.
+The browser never sends the entire 24-hour file in one request. It uses `File.slice()` and one `PATCH` at a time for each video; several distinct video drafts can advance concurrently. The backend serializes each upload ID using an in-process `asyncio.Lock`. An incorrect offset returns 409, and oversized chunks return 413. The browser queries the server offset after a failed response, retries the chunk up to three attempts, and resumes from the committed position. It also recovers from a lost job-creation response by finding a job with the completed upload ID. Backend upload IDs are UUIDs; display filenames never become disk paths.
 
-`ready` currently means **local metadata preprocessing is complete**. It does **not** mean the separate detection/agent service has analyzed the video.
+**Consistency boundary:** the `.part` file is synchronized before SQLite records the new offset. On a failed write the server truncates to the last committed offset. There is no chunk checksum; the completed file is hashed during metadata preparation. In-process locks and local file paths are unsuitable for multiple API worker processes without further coordination.
 
-## Follow-up chat, image upload, and response flow
+## 6. Preparation and status
 
-The **+** control selects PNG, JPEG, WebP, or GIF files. The browser makes temporary preview URLs for display only; validation and storage happen on the server. A message can include up to **10 images**, each at most **20 MiB**. The user may send a question, images, or both, but the job must be `ready`.
+`POST /api/jobs` schedules `preprocess_video` using FastAPI `BackgroundTasks`. The function reads the completed file in 8 MiB blocks to compute SHA-256 and, if installed, calls `ffprobe` for duration. It stores metadata and sets `ready`, or stores an error and sets `failed`. On app startup, unfinished `queued`/`preprocessing` records are scheduled again. The browser polls `GET /api/jobs/{id}` every 3 seconds until `ready` or `failed`. A ready conversation enables chat; the UI shows a toast and may show a browser notification if permission is granted and the page is open.
 
-1. Selecting images shows removable previews beside the unsent message.
-2. On **Send**, the browser uploads each image with `POST /api/sessions/{session_id}/images`, using the file bytes as the request body and `X-Filename` for its display name. Each response contains an `image_id` and a protected `url`.
-3. The browser calls `POST /api/jobs/{session_id}/messages` with `content` and `image_ids`. The backend links those images to the saved user message, saves a placeholder assistant answer, and returns both the assistant response and `user_message`.
-4. The UI adds the user and assistant bubbles. It calls `GET /api/jobs/{session_id}/messages` on open and every 3 seconds while ready. Message IDs prevent duplicate bubbles.
-5. Images in history use `GET /api/sessions/{session_id}/images/{image_id}`. The same session cookie and ownership checks apply when the browser loads each image.
+`ready` means metadata preparation only. The algorithm service is not called. In-process background work is not a durable task queue; job retry, duplicate execution control across workers, and capacity limits must be designed before multi-instance deployment.
+
+## 7. Chat and image flow
 
 ```mermaid
 sequenceDiagram
     actor User
     participant UI as Browser chat
-    participant API as Public FastAPI
-    participant Disk as Image storage
+    participant API as Image and chat routers
+    participant Disk as data/images
     participant DB as SQLite
-    User->>UI: Choose images and enter follow-up question
-    UI-->>User: Local image previews
-    loop Each selected image
-        UI->>API: POST /api/sessions/{session_id}/images (image bytes)
-        API->>Disk: Validate and save image
-        API->>DB: Record image for this session
-        API-->>UI: image_id, protected URL
+    User->>UI: Select images and enter question
+    UI-->>User: Temporary local previews
+    loop Each image
+        UI->>API: POST /api/sessions/{session}/images with bytes
+        API->>API: Validate size, decoded format, dimensions
+        API->>Disk: Save images/session/UUID.extension
+        API->>DB: Insert unattached image row
+        API-->>UI: image ID and protected URL
     end
-    UI->>API: POST /api/jobs/{session_id}/messages {content, image_ids}
-    API->>DB: Save user message and attach image IDs
-    API->>DB: Save placeholder assistant message
-    API-->>UI: assistant message + user_message
-    UI-->>User: Render text and image bubbles
-    loop On open and every 3 seconds while ready
-        UI->>API: GET /api/jobs/{session_id}/messages
-        API-->>UI: Ordered messages with image URLs
-    end
-    UI->>API: GET protected image URL
-    API-->>UI: Image bytes if user owns session
+    UI->>API: POST /api/jobs/{session}/messages {content, image_ids}
+    API->>DB: Check ready status and unattached same-session images
+    API->>DB: Insert user message; attach images; insert assistant reply
+    API-->>UI: both messages and image metadata
+    UI-->>User: Render chat bubbles
+    UI->>API: GET /api/jobs/{session}/messages every 3 seconds
+    API-->>UI: ordered history and owner-checked image URLs
 ```
 
-Example **current** chat request and response (IDs shortened for readability):
+The browser allows PNG, JPEG, WebP, and GIF files of up to 20 MiB each and up to 10 images per message. The server revalidates content with Pillow and rejects excessive dimensions. An image first belongs to a session; `message_id` is assigned when the user sends the question. The message endpoint prevents reattaching the same image or attaching an image from another session. The UI fetches image bytes through the protected session URL and avoids duplicate bubbles by message ID.
 
-```http
-POST /api/jobs/{session_id}/messages
-Content-Type: application/json
+The current assistant reply is generated by conditional metadata rules for filename, size, duration, selected filters, and image count. For detection questions, it explicitly says video/image understanding is not connected. The illustrative screenshot in section 1 is not an implemented algorithm response.
 
-{"content":"What is the filename?","image_ids":["image-uuid"]}
-```
+## 8. Domain class diagram and persistence
 
-```json
-{"id":12,"role":"assistant","content":"The uploaded video is sample-camera.mp4.","images":[],
- "user_message":{"id":11,"role":"user","content":"What is the filename?",
- "images":[{"id":"image-uuid","filename":"reference.png","url":"/api/sessions/{session_id}/images/{image_id}"}]}}
-```
-
-The agent integration is deferred. A future algorithm-service response should be persisted as a real assistant message with authorized result-image URLs before the UI displays it. The illustrative screenshot above shows the intended rendering only; it is not evidence that detection is implemented.
-
-The **planned** response chain for the separate internal service is:
+The following is a **conceptual domain class diagram** mapped to SQLite rows. These are not Python classes in the current code; the backend uses Pydantic request models, route functions, and SQL. Cardinalities show intended record relationships. `Upload` has zero or one `Job` because an upload may finish before a session is created; a job always has exactly one upload.
 
 ```mermaid
-sequenceDiagram
-    actor User
-    participant UI as Browser chat
-    participant API as Public backend
-    participant Worker as Backend worker
-    participant Algo as Internal algorithm service
-    participant Store as Shared video/result storage
-    User->>UI: Ask about the video, optionally attach an image
-    UI->>API: Send question for existing session_id
-    API->>Worker: Queue work by session_id (planned)
-    Worker->>Algo: Internal request with session_id and storage keys (planned)
-    Algo->>Store: Read video/index and write result images
-    Algo-->>Worker: Answer, timestamps, result-image keys
-    Worker->>API: Persist assistant message and authorized image records
-    loop Poll while conversation is open
-        UI->>API: GET /api/jobs/{session_id}/messages
-        API-->>UI: New assistant message and protected image URLs
-    end
-    UI-->>User: Show text, timestamps, and images
+classDiagram
+    class User {
+      +UUID id
+      +string username
+      +string password_hash
+      +bool is_active
+      +bool is_admin
+    }
+    class AuthSession {
+      +string token_hash
+      +UUID user_id
+      +string csrf_token
+      +int expires_at
+    }
+    class Upload {
+      +UUID id
+      +UUID user_id
+      +string filename
+      +int size
+      +int offset
+      +string status
+    }
+    class Job {
+      +UUID id
+      +UUID upload_id
+      +string status
+      +JSON entities
+      +string instructions
+      +JSON metadata
+      +string error
+    }
+    class Message {
+      +int id
+      +UUID job_id
+      +string role
+      +string content
+    }
+    class ImageRecord {
+      +UUID id
+      +UUID session_id
+      +int message_id
+      +string stored_name
+      +string media_type
+      +int size
+    }
+    User "1" --> "0..*" AuthSession : signs in
+    User "1" --> "0..*" Upload : owns
+    Upload "1" --> "0..1" Job : creates
+    Job "1" --> "0..*" Message : contains
+    Job "1" --> "0..*" ImageRecord : owns
+    Message "0..1" --> "0..*" ImageRecord : attaches
 ```
 
-This is a design contract, not a description of code already connected. The internal endpoint, service authentication, worker, shared storage, and result persistence still need implementation.
-
-## Errors, notifications, and responsive behavior
-
-| Condition | Current UI behavior |
+| Invariant | Enforcement |
 | --- | --- |
-| Wrong login | Inline error on sign-in form |
-| No video or no selected entity | Inline form message; no upload starts |
-| Interrupted upload | Saved upload ID and server offset allow retry with the same file/browser |
-| Preprocessing failure | `Failed` status and backend error in the session card; chat disabled |
-| Unsupported or oversized image | Image-specific message; file is not added |
-| Chat request failure | Error beside chat input; question text restored for retry |
-| Upload complete or preprocessing ready | Temporary toast; optional browser notification if permission was granted and the page is open |
+| One video per session | `jobs.upload_id` has a unique index; one job points to one upload |
+| Session owner | `jobs.upload_id -> uploads.user_id`; middleware checks this join |
+| Image belongs to session | `images.session_id = jobs.id`; message endpoint checks session and unattached state |
+| Media naming | Video path is derived from upload UUID; image path from session UUID and server-generated name |
+| Chat order | `messages.id` is an increasing integer; UI de-duplicates by ID |
 
-The responsive breakpoints are defined in `frontend/styles.css` and `frontend/upload.css`. The login columns stack below 900 px; the workspace changes to a narrow top sidebar below 620 px. Form controls and chat messages then use the available width. The interface uses labelled inputs, visible keyboard focus, status/live regions for messages and progress, and `alt` text for displayed images.
+`backend/db.py` is the schema source of truth. `backend/config.py` defines the local storage roots. For the target algorithm integration, the public backend will resolve an authorized session to its upload and image rows, then build an internal request containing storage keys. That request is not currently stored as one JSON document.
 
-## Implementation map
+## 9. Errors, recovery, and verification
 
-| Concern | File |
+| Trigger | Response and UI behavior | Recovery |
+| --- | --- | --- |
+| Invalid login or expired cookie | 401; sign-in view | Sign in again; saved jobs remain under the user |
+| Wrong CSRF token | 403 | Reload to obtain a valid session token |
+| Wrong upload offset | 409 with expected offset | Browser fetches current offset and retries |
+| Interrupted transfer | Failed draft; server retains committed offset | Select same file and retry; refresh loses the `File` handle |
+| Duplicate job for upload | 409 | Browser lists jobs and opens the existing session |
+| Preparation exception | Job `failed` with error; chat disabled | Start a new conversation; operational retry is not implemented |
+| Invalid or oversized image | 413/415; chat image error | Replace the image |
+| Chat before ready or foreign image | 409/422 | Wait for ready or choose a same-session image |
+
+Current tests in `tests/test_auth.py` exercise authentication, ownership, chat/image persistence, independent upload progress, and distinct sessions. `tests/test_cleanup.py` exercises preview and reset behavior. They do not benchmark 24-hour media or validate the planned algorithm service.
+
+## 10. Traceability and open design items
+
+| Concern | Current implementation |
 | --- | --- |
-| Screen structure and accessible labels | `frontend/index.html` |
-| Login, uploads, polling, sidebar, chat, previews | `frontend/script.js` |
-| Base layout and responsive rules | `frontend/styles.css` |
-| Upload, status, and chat styling | `frontend/upload.css` |
-| Auth/session cookies and route ownership | `backend/auth.py` |
-| Chunked upload and completion | `backend/uploads.py` |
-| Session creation and local metadata preprocessing | `backend/jobs.py`, `backend/video_metadata.py` |
-| Image validation, storage, and delivery | `backend/images.py` |
-| Chat persistence and current placeholder answers | `backend/chat.py` |
+| Screen markup and accessibility labels | `frontend/index.html` |
+| Browser state, API calls, progress, polling, chat | `frontend/script.js` |
+| Responsive styling | `frontend/styles.css`, `frontend/upload.css` |
+| Auth and owner checks | `backend/auth.py` |
+| Video transfer | `backend/uploads.py` |
+| Preparation | `backend/jobs.py`, `backend/video_metadata.py` |
+| Images and chat | `backend/images.py`, `backend/chat.py` |
+| Schema, limits, local paths | `backend/db.py`, `backend/schemas.py`, `backend/config.py` |
 
-For the boundary between this public backend and the separately deployed algorithm service, see [architecture.md](../architecture.md).
+Before agent integration, define the internal service contract, shared storage key format, service authentication, idempotency and retry policy, result-image registration, and how preprocessing status differs from algorithm readiness. Before multi-instance production, add durable jobs, shared database/media storage, quotas, cleanup scheduling, backups, metrics, and capacity tests. See the [HLD](../architecture.md) for the target deployment boundary.
