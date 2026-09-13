@@ -74,4 +74,6 @@ python manage_users.py claim-existing alice
 
 Run that command only after choosing the correct owner. It claims every currently unassigned upload; it does not transfer videos already owned by another account. Back up `data/frame.sqlite3` before any manual data migration. For access outside localhost, serve through HTTPS and add login rate limiting, quotas, and operational backups.
 
+To clear local sessions, uploads, messages, images, and login sessions, stop the API and preview the cleanup with `python cleanup_data.py`. Run `python cleanup_data.py --execute` to apply it. User accounts remain available; add `--include-users` only if you also want to remove every account. The script removes media files referenced by database rows, so take a database and media backup first if the data matters.
+
 This SQLite plus local disk configuration is suitable for one server process and development. Do not run multiple Uvicorn workers against this upload implementation: its upload lock is process-local. For production with multiple servers, store video bytes in object storage through multipart upload and use PostgreSQL for upload records, jobs, users, and detection metadata. Give workers the object key or video ID; do not put 24-hour video bytes in the database or agent prompt.
