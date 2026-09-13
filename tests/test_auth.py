@@ -31,6 +31,30 @@ class AuthTest(unittest.TestCase):
                     b = (await bob.post("/api/auth/login", json={"username": "bob", "password": "long-test-password"})).json()
                     ah = {"X-CSRF-Token": a["csrf_token"]}
                     bh = {"X-CSRF-Token": b["csrf_token"]}
+                    first_parallel = (await alice.post("/api/uploads", json={"filename": "first.mp4", "size": 3}, headers=ah)).json()["id"]
+                    second_parallel = (await alice.post("/api/uploads", json={"filename": "second.mp4", "size": 3}, headers=ah)).json()["id"]
+                    first_stream_waiting = asyncio.Event()
+                    release_first_stream = asyncio.Event()
+
+                    async def slow_first_chunk():
+                        yield b"a"
+                        first_stream_waiting.set()
+                        await release_first_stream.wait()
+                        yield b"bc"
+
+                    first_task = asyncio.create_task(alice.patch(
+                        f"/api/uploads/{first_parallel}", content=slow_first_chunk(),
+                        headers={**ah, "Upload-Offset": "0"}))
+                    try:
+                        await asyncio.wait_for(first_stream_waiting.wait(), 2)
+                        second_response = await asyncio.wait_for(alice.patch(
+                            f"/api/uploads/{second_parallel}", content=b"xyz",
+                            headers={**ah, "Upload-Offset": "0"}), 2)
+                        self.assertEqual(second_response.status_code, 200)
+                        self.assertEqual(second_response.json()["offset"], 3)
+                    finally:
+                        release_first_stream.set()
+                    self.assertEqual((await first_task).json()["offset"], 3)
                     self.assertEqual((await alice.post("/api/uploads", json={"filename": "a.mp4", "size": 3})).status_code, 403)
                     upload = (await alice.post("/api/uploads", json={"filename": "a.mp4", "size": 3}, headers=ah)).json()
                     uid = upload["id"]

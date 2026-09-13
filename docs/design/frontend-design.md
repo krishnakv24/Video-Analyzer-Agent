@@ -34,12 +34,14 @@ On narrow screens, the sidebar becomes a top section. The session list remains h
 | --- | --- | --- | --- |
 | Signed out | Login form; workspace hidden | Enter credentials | Workspace, or inline error |
 | New conversation | Video picker, entity filters, instructions | Select a video and press **Analyze video** | Uploading |
-| Uploading | Percentage progress; Analyze disabled | Wait or retry after an error | Preprocessing |
+| Uploading | Percentage progress in the form and sidebar; Analyze disabled for that draft | Start another conversation, wait, or retry after an error | Preprocessing |
 | Preprocessing | Session ID, status text, disabled chat input | Leave page or wait | Ready or Failed |
 | Ready | Chat enabled, **Chat** button enabled, Analyze locked for this session | Send question and optional images | Ready with more messages |
 | Failed | Error shown in status card; chat unavailable | Start a new conversation | New conversation |
 
 Each session has **one video**. The **New conversation** button resets the composer for another session. Clicking a saved session opens its status and conversation. On refresh, the browser asks the backend for the signed-in user and their sessions, then reopens the last selected session if it still belongs to that user.
+
+Multiple uploads may run in the same tab. The sidebar keeps an in-progress draft for each video, with a separate file, prompt, entity selection, and percentage. Switching to **New conversation** leaves earlier transfers running. When an upload creates a job, its draft becomes a saved session. Browser refresh cannot retain a `File` object, so an interrupted transfer must be resumed by reselecting that file; the backend offset remains saved.
 
 ```mermaid
 stateDiagram-v2

@@ -4,6 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 from uuid import uuid4
+from weakref import WeakValueDictionary
 from fastapi import APIRouter, HTTPException, Request
 from .common import checked_id
 from .config import CHUNK_SIZE, UPLOAD_DIR
@@ -11,7 +12,16 @@ from .db import db_connection
 from .schemas import UploadCreate
 
 router = APIRouter()
-upload_lock = asyncio.Lock()
+upload_locks = WeakValueDictionary()
+
+
+def lock_for(upload_id: str) -> asyncio.Lock:
+    """Serialize writes to one video without blocking unrelated uploads."""
+    lock = upload_locks.get(upload_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        upload_locks[upload_id] = lock
+    return lock
 
 
 def get_upload(db, upload_id: str):
@@ -59,7 +69,7 @@ async def append_upload(upload_id: str, request: Request):
     if client_offset < 0:
         raise HTTPException(400, "Upload-Offset must be nonnegative")
     upload_id = checked_id(upload_id)
-    async with upload_lock:
+    async with lock_for(upload_id):
         with db_connection() as db:
             row = get_upload(db, upload_id)
             if row["status"] != "uploading":
@@ -95,7 +105,7 @@ async def append_upload(upload_id: str, request: Request):
 @router.post("/api/uploads/{upload_id}/complete")
 async def complete_upload(upload_id: str):
     upload_id = checked_id(upload_id)
-    async with upload_lock:
+    async with lock_for(upload_id):
         with db_connection() as db:
             row = get_upload(db, upload_id)
             if row["status"] == "complete":

@@ -6,7 +6,9 @@ const fileRow = document.querySelector('#file-row');
 const formMessage = document.querySelector('#form-message');
 const result = document.querySelector('#analysis-result');
 let currentFile = null;
-let uploading = false;
+const uploadDrafts = new Map();
+let activeDraftId = null;
+let nextDraftId = 0;
 let activeJobId = null;
 let jobTimer = null;
 let messageTimer = null;
@@ -59,7 +61,7 @@ function showProgress(offset, size) {
   progressLabel.textContent = `${percent}% uploaded`;
 }
 
-async function uploadVideo(file) {
+async function uploadVideo(file, onProgress) {
   const key = uploadKey(file);
   const legacyKey = `frameUpload:${file.name}:${file.size}:${file.lastModified}`;
   let upload;
@@ -84,7 +86,7 @@ async function uploadVideo(file) {
     localStorage.setItem(key, upload.id);
   }
   let offset = upload.offset;
-  showProgress(offset, file.size);
+  onProgress(offset, file.size);
   while (offset < file.size) {
     const chunk = file.slice(offset, offset + upload.chunk_size);
     let sent = false;
@@ -102,10 +104,103 @@ async function uploadVideo(file) {
         else if (attempt === 2) throw error;
       }
     }
-    showProgress(offset, file.size);
+    onProgress(offset, file.size);
   }
   if (upload.status !== 'complete') await api(`/api/uploads/${upload.id}/complete`, { method: 'POST' });
   return { id: upload.id, storageKey: key };
+}
+
+function renderDraft(draft) {
+  draft.button.querySelector('small').textContent = draft.status === 'failed'
+    ? 'Upload failed · select to retry'
+    : `Uploading ${draft.progress}%`;
+  draft.button.classList.toggle('active', activeDraftId === draft.id);
+}
+
+function createDraft(file, entities, instructions) {
+  const draft = {
+    id: `draft-${++nextDraftId}`, file, entities, instructions,
+    progress: 0, status: 'uploading', error: ''
+  };
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'conversation active';
+  button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg><span class="conversation-copy"><strong></strong><small></small></span>';
+  button.querySelector('strong').textContent = file.name.replace(/\.[^.]+$/, '');
+  button.addEventListener('click', () => showDraft(draft.id));
+  draft.button = button;
+  uploadDrafts.set(draft.id, draft);
+  activeDraftId = draft.id;
+  document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
+  document.querySelector('#conversation-list').prepend(button);
+  renderDraft(draft);
+  return draft;
+}
+
+function showDraft(draftId) {
+  const draft = uploadDrafts.get(draftId);
+  if (!draft) return;
+  clearVideo();
+  activeDraftId = draftId;
+  currentFile = draft.file;
+  document.querySelector('#file-name').textContent = draft.file.name;
+  document.querySelector('#file-meta').textContent = `${(draft.file.size / 1024 / 1024).toFixed(1)} MB · Video`;
+  fileRow.hidden = false;
+  document.querySelector('#instructions').value = draft.instructions;
+  document.querySelectorAll('.entity-options input').forEach(input => {
+    input.checked = draft.entities.includes(input.value);
+  });
+  showProgress(draft.progress, 100);
+  formMessage.textContent = draft.error;
+  const busy = draft.status === 'uploading';
+  analyzeButton.disabled = busy;
+  analyzeButton.textContent = busy ? 'Uploading…' : 'Analyze video ↑';
+  fileInput.disabled = busy;
+  document.querySelector('#remove-file').disabled = busy;
+  document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
+  renderDraft(draft);
+}
+
+async function runUpload(draft) {
+  const { file, entities, instructions } = draft;
+  try {
+    const upload = await uploadVideo(file, (offset, size) => {
+      draft.progress = Math.round(offset / size * 100);
+      renderDraft(draft);
+      if (activeDraftId === draft.id) showProgress(offset, size);
+    });
+    let job;
+    try {
+      job = await api('/api/jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ upload_id: upload.id, entities, instructions })
+      });
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      job = (await api('/api/jobs')).jobs.find(item => item.upload_id === upload.id);
+      if (!job) throw error;
+    }
+    localStorage.removeItem(upload.storageKey);
+    const selected = activeDraftId === draft.id;
+    uploadDrafts.delete(draft.id);
+    draft.button.remove();
+    addConversation(file.name.replace(/\.[^.]+$/, ''), job.id, selected);
+    if (selected) openJob(job.id);
+    notifyUser(`${file.name} uploaded. Background preprocessing has started.`, true);
+  } catch (error) {
+    draft.status = 'failed';
+    draft.error = `${error.message}. Select this conversation and retry with the same file.`;
+    renderDraft(draft);
+    if (activeDraftId === draft.id) formMessage.textContent = draft.error;
+  } finally {
+    if (activeDraftId === draft.id) {
+      const busy = draft.status === 'uploading';
+      analyzeButton.disabled = busy;
+      analyzeButton.innerHTML = 'Analyze video <span aria-hidden="true">↑</span>';
+      fileInput.disabled = busy;
+      document.querySelector('#remove-file').disabled = busy;
+    }
+  }
 }
 
 async function showWorkspace(user) {
@@ -212,6 +307,10 @@ async function refreshJob() {
 
 function openJob(jobId) {
   clearPendingImages();
+  activeDraftId = null;
+  currentFile = null;
+  fileInput.value = '';
+  fileInput.disabled = false;
   activeJobId = jobId;
   if (currentUser) localStorage.setItem(`frameLastJob:${currentUser.id}`, jobId);
   document.querySelectorAll('.conversation').forEach(item => {
@@ -267,9 +366,11 @@ function clearPendingImages() {
 }
 
 function clearVideo() {
-  if (uploading) return;
+  activeDraftId = null;
   currentFile = null;
   fileInput.value = '';
+  fileInput.disabled = false;
+  document.querySelector('#remove-file').disabled = false;
   fileRow.hidden = true;
   result.hidden = true;
   result.replaceChildren();
@@ -292,13 +393,13 @@ function clearVideo() {
   lastJobStatus = null;
 }
 
-function addConversation(title, jobId) {
+function addConversation(title, jobId, activate = true) {
   const list = document.querySelector('#conversation-list');
-  list.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
+  if (activate) list.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
   const button = document.createElement('button');
   button.type = 'button';
   button.dataset.jobId = jobId;
-  button.className = 'conversation active';
+  button.className = `conversation${activate ? ' active' : ''}`;
   button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg><span class="conversation-copy"><strong></strong><small>Video · just now</small></span>';
   button.querySelector('strong').textContent = title;
   button.addEventListener('click', () => {
@@ -307,7 +408,6 @@ function addConversation(title, jobId) {
     openJob(jobId);
   });
   list.prepend(button);
-
 }
 
 loginForm.addEventListener('submit', async event => {
@@ -336,7 +436,10 @@ document.querySelector('#toggle-password').addEventListener('click', event => {
 });
 
 document.querySelector('#sign-out').addEventListener('click', async () => {
-  if (uploading) { notifyUser('Wait for the upload to finish before signing out.'); return; }
+  if ([...uploadDrafts.values()].some(draft => draft.status === 'uploading')) {
+    notifyUser('Wait for active uploads to finish before signing out.');
+    return;
+  }
   try { await api('/api/auth/logout', { method: 'POST' }); }
   catch (error) { notifyUser(`Could not sign out: ${error.message}`); return; }
   clearVideo();
@@ -348,7 +451,6 @@ document.querySelector('#sign-out').addEventListener('click', async () => {
 });
 
 document.querySelector('#new-conversation').addEventListener('click', () => {
-  if (uploading) return;
   clearVideo();
   document.querySelector('#instructions').value = '';
   document.querySelectorAll('.entity-options input').forEach(input => { input.checked = ['People', 'Cars'].includes(input.value); });
@@ -384,7 +486,15 @@ fileInput.addEventListener('change', () => {
   formMessage.textContent = '';
 });
 
-document.querySelector('#remove-file').addEventListener('click', clearVideo);
+document.querySelector('#remove-file').addEventListener('click', () => {
+  if (activeDraftId) {
+    const draft = uploadDrafts.get(activeDraftId);
+    if (draft?.status === 'uploading') return;
+    draft?.button.remove();
+    uploadDrafts.delete(activeDraftId);
+  }
+  clearVideo();
+});
 
 openChatButton.addEventListener('click', () => {
   if (openChatButton.disabled) return;
@@ -394,39 +504,28 @@ openChatButton.addEventListener('click', () => {
 
 document.querySelector('#analysis-form').addEventListener('submit', async event => {
   event.preventDefault();
-  if (uploading || activeJobId) return;
+  if (activeJobId || (activeDraftId && uploadDrafts.get(activeDraftId)?.status === 'uploading')) return;
   if (!currentFile) { formMessage.textContent = 'Add a video before starting analysis.'; fileInput.focus(); return; }
   const entities = [...document.querySelectorAll('.entity-options input:checked')].map(input => input.value);
   if (!entities.length) { formMessage.textContent = 'Select at least one entity.'; return; }
+  if ([...uploadDrafts.values()].some(draft => draft.status === 'uploading' && uploadKey(draft.file) === uploadKey(currentFile))) {
+    formMessage.textContent = 'This file is already uploading in another conversation.';
+    return;
+  }
   formMessage.textContent = '';
-  uploading = true;
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  const draft = activeDraftId ? uploadDrafts.get(activeDraftId) : createDraft(currentFile, entities, document.querySelector('#instructions').value);
+  draft.file = currentFile;
+  draft.entities = entities;
+  draft.instructions = document.querySelector('#instructions').value;
+  draft.status = 'uploading';
+  draft.error = '';
+  renderDraft(draft);
   analyzeButton.disabled = true;
   analyzeButton.textContent = 'Uploading…';
-  try {
-    const upload = await uploadVideo(currentFile);
-    let job;
-    try {
-      job = await api('/api/jobs', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upload_id: upload.id, entities, instructions: document.querySelector('#instructions').value })
-      });
-    } catch (error) {
-      if (error.status !== 409) throw error;
-      job = (await api('/api/jobs')).jobs.find(item => item.upload_id === upload.id);
-      if (!job) throw error;
-    }
-    localStorage.removeItem(upload.storageKey);
-    addConversation(currentFile.name.replace(/\.[^.]+$/, ''), job.id);
-    openJob(job.id);
-    notifyUser('Video upload complete. Background preprocessing has started.', true);
-  } catch (error) {
-    formMessage.textContent = `${error.message}. Re-select the same file and try again to resume.`;
-  } finally {
-    uploading = false;
-    analyzeButton.disabled = Boolean(activeJobId);
-    analyzeButton.innerHTML = 'Analyze video <span aria-hidden="true">↑</span>';
-  }
+  fileInput.disabled = true;
+  document.querySelector('#remove-file').disabled = true;
+  await runUpload(draft);
 });
 
 document.querySelector('#chat-form').addEventListener('submit', async event => {
