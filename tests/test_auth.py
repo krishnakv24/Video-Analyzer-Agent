@@ -87,6 +87,16 @@ class AuthTest(unittest.TestCase):
                     for path in (f"/api/jobs/{jid}", f"/api/jobs/{jid}/messages", f"/api/sessions/{jid}/images"):
                         self.assertEqual((await bob.get(path)).status_code, 404)
                     self.assertEqual((await bob.post(f"/api/jobs/{jid}/messages", json={"content": "hi"}, headers=bh)).status_code, 404)
+                    for upload_id in (first_parallel, second_parallel):
+                        self.assertEqual((await alice.post(f"/api/uploads/{upload_id}/complete", headers=ah)).status_code, 200)
+                    parallel_jobs = []
+                    for upload_id in (first_parallel, second_parallel):
+                        response = await alice.post("/api/jobs", json={"upload_id": upload_id, "entities": ["People"]}, headers=ah)
+                        self.assertEqual(response.status_code, 201)
+                        parallel_jobs.append(response.json())
+                    self.assertEqual(len({job["id"] for job in parallel_jobs}), 2)
+                    self.assertEqual(len({job["session_id"] for job in parallel_jobs}), 2)
+                    self.assertEqual(len((await alice.get("/api/jobs")).json()["jobs"]), 3)
                     self.assertEqual((await alice.post("/api/auth/change-password", json={"current_password": "wrong", "new_password": "new-long-password"}, headers=ah)).status_code, 401)
                     self.assertEqual((await alice.post("/api/auth/change-password", json={"current_password": "long-test-password", "new_password": "new-long-password"}, headers=ah)).status_code, 200)
                     self.assertEqual((await alice.post("/api/auth/logout", headers=ah)).status_code, 200)

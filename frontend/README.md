@@ -13,7 +13,7 @@ python -m uvicorn main:app --reload
 
 For Bash on Linux, macOS, or Git Bash on Windows, run `bash setup.sh`. The script creates or reuses `.venv`, installs `requirements.txt`, and prints the activation command for your platform. Run that printed `source .../activate` command in your shell before starting Uvicorn; executing a setup script cannot activate the environment in its parent shell.
 
-To run the API tests, install the optional test dependency with `python -m pip install -r requirements-dev.txt`, then run `python -m unittest discover -s tests -v` from the repository root.
+To run the API tests, install `requirements.txt`, then run `python -m unittest discover -s tests -v` from the repository root.
 
 Open `http://127.0.0.1:8000/` for the page and `http://127.0.0.1:8000/docs` for the API. The page must be opened through FastAPI to upload files; opening `index.html` directly will not provide the API.
 
