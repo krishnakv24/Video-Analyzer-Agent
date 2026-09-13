@@ -60,17 +60,24 @@ async def upload_image(session_id: str, request: Request):
     image_id = str(uuid4())
     stored_name = f"{image_id}.{extension}"
     directory = IMAGE_DIR / session_id
-    directory.mkdir(parents=True, exist_ok=True)
     path = directory / stored_name
-    path.write_bytes(raw)
     filename = Path(unquote(request.headers.get("X-Filename", "image")).replace("\\", "/")).name[:255]
+    written = False
     try:
         with db_connection() as db:
+            # The conversation may have been deleted while its image was streaming.
+            # Hold the write transaction only during this final save, never across await.
+            db.execute("BEGIN IMMEDIATE")
+            get_session(db, session_id)
+            directory.mkdir(parents=True, exist_ok=True)
+            written = True
+            path.write_bytes(raw)
             db.execute("""INSERT INTO images(id, session_id, filename, stored_name, media_type, size)
                 VALUES (?, ?, ?, ?, ?, ?)""",
                 (image_id, session_id, filename, stored_name, media_type, len(raw)))
     except Exception:
-        path.unlink(missing_ok=True)
+        if written:
+            path.unlink(missing_ok=True)
         raise
     return {"id": image_id, "session_id": session_id, "filename": filename,
             "size": len(raw), "media_type": media_type,

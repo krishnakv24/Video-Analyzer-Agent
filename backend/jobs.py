@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from .video_metadata import inspect_video
 from .common import checked_id
+from .conversation_deletion import delete_conversation
 from .config import UPLOAD_DIR
 from .db import db_connection
 from .schemas import JobCreate
@@ -88,6 +89,11 @@ def job_status(job_id: str):
             "entities": json.loads(row["entities"]), "instructions": row["instructions"],
             "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
             "error": row["error"]}
+
+
+@router.delete("/api/jobs/{job_id}")
+def delete_job(job_id: str, request: Request):
+    return delete_conversation(job_id, request.state.user_id)
 
 
 def get_session(db, session_id: str):

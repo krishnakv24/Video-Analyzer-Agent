@@ -36,6 +36,8 @@ def send_message(job_id: str, payload: ChatMessage):
         raise HTTPException(422, "Duplicate image attachment")
     image_ids = [checked_id(value) for value in payload.image_ids]
     with db_connection() as db:
+        # Serialize the final existence check and inserts with conversation deletion.
+        db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT status, metadata, entities FROM jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "Job not found")

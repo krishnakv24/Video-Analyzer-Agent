@@ -420,11 +420,22 @@ svg {
   font-size:14px;
 }
 
-.settings-button {
+.sign-out-button {
   border:0;
   background:transparent;
   color:#61726d;
-  padding:5px;
+  padding:9px;
+  width:40px;
+  height:40px;
+  border-radius:8px;
+  display:grid;
+  place-items:center;
+  flex:none;
+}
+
+.sign-out-button:hover {
+  background:#eaf3ee;
+  color:#245c42;
 }
 
 .workspace-main {

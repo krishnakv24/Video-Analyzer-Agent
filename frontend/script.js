@@ -36,6 +36,14 @@ const signInButton = loginForm.querySelector('button[type="submit"]');
 const MAX_IMAGES_PER_MESSAGE = 10;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const POLL_INTERVAL_MS = 3000;
+const conversationMenu = document.querySelector('#conversation-menu');
+const deleteDialog = document.querySelector('#delete-dialog');
+const deleteError = document.querySelector('#delete-dialog-error');
+const confirmDelete = document.querySelector('#confirm-delete');
+const cancelDelete = document.querySelector('#cancel-delete');
+let menuTarget = null;
+let deleteTarget = null;
+let deleteInProgress = false;
 
 async function api(url, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -300,12 +308,16 @@ function displayJob(job) {
 }
 
 async function refreshJob() {
-  if (!activeJobId) return;
-  try { displayJob(await api(`/api/jobs/${activeJobId}`)); }
-  catch (error) { document.querySelector('#chat-subtitle').textContent = `Could not check status: ${error.message}`; }
+  const jobId = activeJobId;
+  if (!jobId) return;
+  try { displayJob(await api(`/api/jobs/${jobId}`)); }
+  catch (error) {
+    if (activeJobId === jobId) document.querySelector('#chat-subtitle').textContent = `Could not check status: ${error.message}`;
+  }
 }
 
 function openJob(jobId) {
+  closeConversationMenu();
   clearPendingImages();
   activeDraftId = null;
   currentFile = null;
@@ -321,7 +333,7 @@ function openJob(jobId) {
   openChatButton.hidden = false;
   openChatButton.disabled = true;
   document.querySelector('#intro-title').textContent = 'Your video session';
-  document.querySelector('#intro-subtitle').textContent = 'One video per session. Add images or continue in chat.';
+  document.querySelector('#intro-subtitle').textContent = 'Ask follow-up questions and add reference images to explore your video.';
   lastJobStatus = null;
   chatPanel.hidden = false;
   chatInput.disabled = true;
@@ -366,6 +378,7 @@ function clearPendingImages() {
 }
 
 function clearVideo() {
+  closeConversationMenu();
   activeDraftId = null;
   currentFile = null;
   fileInput.value = '';
@@ -378,6 +391,7 @@ function clearVideo() {
   progressWrap.hidden = true;
   analysisForm.classList.remove('session-locked');
   analyzeButton.disabled = false;
+  analyzeButton.innerHTML = 'Analyze video <span aria-hidden="true">↑</span>';
   openChatButton.hidden = true;
   openChatButton.disabled = true;
   document.querySelector('#intro-title').textContent = 'A closer look at your video.';
@@ -393,21 +407,161 @@ function clearVideo() {
   lastJobStatus = null;
 }
 
+function startNewConversation() {
+  clearVideo();
+  chatInput.value = '';
+  imageInput.disabled = false;
+  document.querySelector('#instructions').value = '';
+  document.querySelectorAll('.entity-options input').forEach(input => { input.checked = ['People', 'Cars'].includes(input.value); });
+  document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
+  fileInput.focus();
+}
+
+function closeConversationMenu(restoreFocus = false) {
+  const trigger = menuTarget?.trigger;
+  conversationMenu.hidden = true;
+  menuTarget?.options.setAttribute('aria-expanded', 'false');
+  menuTarget = null;
+  if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
+}
+
+function showConversationMenu(target, x, y) {
+  closeConversationMenu();
+  menuTarget = target;
+  target.options.setAttribute('aria-expanded', 'true');
+  conversationMenu.hidden = false;
+  const margin = 8;
+  const left = Math.max(margin, Math.min(x, window.innerWidth - conversationMenu.offsetWidth - margin));
+  const top = Math.max(margin, Math.min(y, window.innerHeight - conversationMenu.offsetHeight - margin));
+  conversationMenu.style.left = `${left}px`;
+  conversationMenu.style.top = `${top}px`;
+  document.querySelector('#delete-conversation').focus({ preventScroll: true });
+}
+
+document.addEventListener('pointerdown', event => {
+  if (!conversationMenu.hidden && !conversationMenu.contains(event.target)) closeConversationMenu();
+});
+document.addEventListener('keydown', event => {
+  if (conversationMenu.hidden) return;
+  if (event.key === 'Escape' || event.key === 'Tab') {
+    if (event.key === 'Escape') event.preventDefault();
+    closeConversationMenu(true);
+  }
+});
+window.addEventListener('resize', () => closeConversationMenu());
+document.addEventListener('scroll', () => closeConversationMenu(), true);
+
+document.querySelector('#delete-conversation').addEventListener('click', () => {
+  if (!menuTarget) return;
+  deleteTarget = menuTarget;
+  closeConversationMenu();
+  document.querySelector('#delete-dialog-description').textContent = `“${deleteTarget.title}” and its video, images, and messages will be permanently deleted. This cannot be undone.`;
+  deleteError.hidden = true;
+  deleteError.textContent = '';
+  deleteDialog.showModal();
+  cancelDelete.focus();
+});
+
+cancelDelete.addEventListener('click', () => deleteDialog.close());
+deleteDialog.addEventListener('cancel', event => {
+  if (deleteInProgress) event.preventDefault();
+});
+deleteDialog.addEventListener('close', () => {
+  const trigger = deleteTarget?.trigger;
+  deleteTarget = null;
+  if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+});
+
+confirmDelete.addEventListener('click', async () => {
+  if (!deleteTarget || deleteInProgress) return;
+  const target = deleteTarget;
+  deleteInProgress = true;
+  confirmDelete.disabled = true;
+  cancelDelete.disabled = true;
+  confirmDelete.textContent = 'Deleting…';
+  deleteDialog.setAttribute('aria-busy', 'true');
+  deleteError.hidden = true;
+  try {
+    let response;
+    try {
+      response = await api(`/api/jobs/${target.jobId}`, { method: 'DELETE' });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      response = { already_removed: true };
+    }
+    target.row.remove();
+    const preference = `frameLastJob:${currentUser.id}`;
+    if (localStorage.getItem(preference) === target.jobId) localStorage.removeItem(preference);
+    const wasActive = activeJobId === target.jobId;
+    deleteDialog.close();
+    if (wasActive) {
+      startNewConversation();
+      const next = document.querySelector('.conversation[data-job-id]');
+      if (next) {
+        openJob(next.dataset.jobId);
+        next.focus({ preventScroll: true });
+      }
+    } else if (!target.trigger.isConnected) {
+      (document.querySelector('.conversation.active') || document.querySelector('#new-conversation')).focus({ preventScroll: true });
+    }
+    notifyUser(response.cleanup_pending ? 'Conversation deleted. Some stored files could not be removed.'
+      : response.already_removed ? 'This conversation is no longer available.' : 'Conversation deleted.');
+  } catch (error) {
+    deleteError.textContent = `Could not delete: ${error.message}`;
+    deleteError.hidden = false;
+  } finally {
+    deleteInProgress = false;
+    confirmDelete.disabled = false;
+    cancelDelete.disabled = false;
+    confirmDelete.textContent = 'Delete conversation';
+    deleteDialog.removeAttribute('aria-busy');
+  }
+});
+
 function addConversation(title, jobId, activate = true) {
   const list = document.querySelector('#conversation-list');
   if (activate) list.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
   const button = document.createElement('button');
+  const row = document.createElement('div');
+  row.className = 'conversation-item';
   button.type = 'button';
   button.dataset.jobId = jobId;
   button.className = `conversation${activate ? ' active' : ''}`;
   button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg><span class="conversation-copy"><strong></strong><small>Video · just now</small></span>';
   button.querySelector('strong').textContent = title;
+  button.title = title;
   button.addEventListener('click', () => {
     list.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
     button.classList.add('active');
     openJob(jobId);
   });
-  list.prepend(button);
+  const options = document.createElement('button');
+  options.type = 'button';
+  options.className = 'conversation-options';
+  options.setAttribute('aria-label', `Options for ${title}`);
+  options.setAttribute('aria-haspopup', 'menu');
+  options.setAttribute('aria-expanded', 'false');
+  options.setAttribute('aria-controls', 'conversation-menu');
+  options.title = 'Conversation options';
+  options.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
+  options.addEventListener('click', () => {
+    const rect = options.getBoundingClientRect();
+    showConversationMenu({ jobId, title, row, options, trigger: options }, rect.left, rect.bottom + 4);
+  });
+  row.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    const rect = button.getBoundingClientRect();
+    showConversationMenu({ jobId, title, row, options, trigger: button }, event.clientX || rect.left, event.clientY || rect.bottom);
+  });
+  button.addEventListener('keydown', event => {
+    if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+      event.preventDefault();
+      const rect = button.getBoundingClientRect();
+      showConversationMenu({ jobId, title, row, options, trigger: button }, rect.left, rect.bottom);
+    }
+  });
+  row.append(button, options);
+  list.prepend(row);
 }
 
 loginForm.addEventListener('submit', async event => {
@@ -450,13 +604,7 @@ document.querySelector('#sign-out').addEventListener('click', async () => {
   loginScreen.hidden = false;
 });
 
-document.querySelector('#new-conversation').addEventListener('click', () => {
-  clearVideo();
-  document.querySelector('#instructions').value = '';
-  document.querySelectorAll('.entity-options input').forEach(input => { input.checked = ['People', 'Cars'].includes(input.value); });
-  document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
-  fileInput.focus();
-});
+document.querySelector('#new-conversation').addEventListener('click', startNewConversation);
 
 imageInput.addEventListener('change', () => {
   const files = [...imageInput.files];
