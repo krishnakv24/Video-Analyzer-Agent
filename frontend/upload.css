@@ -1,0 +1,405 @@
+/* Keep the primary form visible on laptop screens; scroll for conversation history. */
+
+.upload-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  color: #52715f;
+  font-size: 14px;
+}
+
+.upload-progress-wrap progress {
+  width: 100%;
+  height: 12px;
+  accent-color: #2e7855;
+}
+
+.action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.analyze-button:disabled {
+  opacity: .48;
+  cursor: not-allowed;
+}
+
+.chat-button {
+  min-width: 105px;
+  height: 58px;
+  border: 1px solid #2e7855;
+  border-radius: 9px;
+  background: #fff;
+  color: #2e7855;
+  font-weight: 600;
+}
+
+.chat-button:hover:not(:disabled) {
+  background: #edf6f1;
+}
+
+.chat-button:disabled {
+  opacity: .48;
+  cursor: not-allowed;
+}
+
+.session-locked .file-row, .session-locked .entity-heading, .session-locked .entity-options, .session-locked textarea, .session-locked .add-video, .session-locked .upload-progress-wrap {
+  display: none !important;
+}
+
+.session-locked .card-actions {
+  justify-content: flex-end;
+  margin-top: 0;
+}
+
+.session-locked {
+  padding: 14px 18px;
+}
+
+.workspace-screen {
+  min-height: 100dvh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.workspace-main {
+  min-height: 100dvh;
+}
+
+.workspace-content {
+  margin-top: clamp(18px, 4vh, 46px);
+}
+
+.video-badge {
+  width: clamp(76px, 10vh, 104px);
+  height: clamp(76px, 10vh, 104px);
+  margin-bottom: 17px;
+}
+
+.video-badge svg {
+  width: 45px;
+  height: 45px;
+}
+
+.intro h1 {
+  font-size: clamp(25px, 2.6vw, 34px);
+  margin-bottom: 7px;
+}
+
+.intro p {
+  font-size: clamp(16px, 1.5vw, 19px);
+}
+
+.analysis-card {
+  margin-top: clamp(22px, 4vh, 44px);
+}
+
+.login-story, .login-form-side {
+  min-height: 100dvh;
+}
+
+.story-content {
+  min-height: 100dvh;
+}
+
+.story-art {
+  width: min(100%, 610px);
+  margin-top: clamp(24px, 5vh, 65px);
+}
+
+.story-heading {
+  margin-top: clamp(30px, 6vh, 69px);
+}
+
+.login-bottom {
+  bottom: clamp(20px, 5vh, 68px);
+}
+
+.chat-panel {
+  margin-top: 18px;
+  border: 1px solid #d8e0e1;
+  border-radius: 14px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.chat-head {
+  padding: 16px 20px;
+  border-bottom: 1px solid #e5ebe8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.chat-head h2 {
+  margin: 0 0 4px;
+  font-size: 19px;
+}
+
+.chat-head p {
+  margin: 0;
+  color: #6e7b7b;
+  font-size: 14px;
+}
+
+.job-state {
+  flex: none;
+  padding: 7px 11px;
+  border-radius: 100px;
+  background: #edf6f1;
+  color: #2e7855;
+  font-size: 13px;
+}
+
+.chat-messages {
+  min-height: 130px;
+  max-height: min(38vh, 350px);
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.image-message {
+  color: #6e7b7b;
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+
+.image-message:empty {
+  display: none;
+}
+
+.chat-bubble {
+  max-width: min(80%, 600px);
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: #f1f6f3;
+  color: #26352d;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-bubble.user {
+  align-self: flex-end;
+  background: #2e7855;
+  color: #fff;
+}
+
+.chat-form {
+  display: flex;
+  gap: 10px;
+  padding: 13px 20px;
+  border-top: 1px solid #e5ebe8;
+}
+
+.chat-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #d7dfe1;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.chat-attach {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border: 1px solid #bdd4c5;
+  border-radius: 50%;
+  color: #2e7855;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.chat-attach:hover {
+  background: #edf6f1;
+}
+
+.chat-form .chat-attach input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+}
+
+.chat-attach:focus-within {
+  outline: 3px solid #85b99b;
+  outline-offset: 2px;
+}
+
+.pending-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 20px 0;
+}
+
+.pending-images:empty {
+  display: none;
+}
+
+.pending-image-card {
+  position: relative;
+  width: 75px;
+  height: 75px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #dce5e0;
+}
+
+.pending-image-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pending-image-card button {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: #243d35df;
+  color: white;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.message-attachments img {
+  display: block;
+  max-width: min(180px, 100%);
+  max-height: 180px;
+  border-radius: 6px;
+  object-fit: contain;
+  background: #fff;
+}
+
+.chat-panel > .image-message {
+  padding: 0 20px;
+}
+
+.chat-form button {
+  padding: 0 22px;
+}
+
+.chat-form button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+.toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 10;
+  max-width: 360px;
+  padding: 15px 18px;
+  border-radius: 10px;
+  background: #244c37;
+  color: #fff;
+  box-shadow: 0 12px 30px #0002;
+}
+
+@media (max-height: 800px) and (min-width: 901px) {
+  .story-content {
+    padding-top: 34px;
+    padding-bottom: 28px;
+  }
+  .story-heading {
+    margin-top: 28px;
+  }
+  .story-art {
+    width: min(90%, 490px);
+    margin-top: 25px;
+  }
+  .story-footer {
+    margin-top: 15px;
+  }
+  .workspace-content {
+    margin-top: 18px;
+  }
+  .video-badge {
+    width: 72px;
+    height: 72px;
+    margin-bottom: 10px;
+  }
+  .video-badge svg {
+    width: 35px;
+    height: 35px;
+  }
+  .analysis-card {
+    margin-top: 20px;
+    padding: 16px;
+  }
+  .analysis-card textarea {
+    height: 66px;
+  }
+  .card-actions {
+    margin-top: 10px;
+  }
+  .privacy-note {
+    margin: 13px 0;
+  }
+}
+
+@media (max-width: 900px) {
+  .story-content {
+    min-height: 330px;
+  }
+  .login-story {
+    min-height: 330px;
+  }
+}
+
+@media (max-width: 620px) {
+  .sidebar {
+    position: static;
+    height: auto;
+    overflow: visible;
+  }
+  .workspace-main {
+    min-height: calc(100dvh - 74px);
+  }
+  .workspace-content {
+    margin-top: 25px;
+  }
+  .analysis-card {
+    margin-top: 25px;
+  }
+  .chat-head {
+    align-items: flex-start;
+  }
+  .chat-messages {
+    max-height: 42vh;
+  }
+  .story-content, .login-story {
+    min-height: 255px;
+  }
+}
