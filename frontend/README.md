@@ -1,6 +1,6 @@
 # Frame video upload prototype
 
-The interface screens, screenshots, interaction states, API call chains, and chat response flow are documented in [docs/design/frontend-design.md](../docs/design/frontend-design.md).
+Start with the [architecture HLD](../docs/architecture.md) for the Ubuntu, Docker, Kubernetes, and host-storage design. The [frontend LLD](../docs/design/frontend-design.md) covers screens, screenshots, and interactions; the [backend LLD](../docs/design/backend-design.md) covers APIs, session mapping, and class diagrams.
 
 Run from the repository root:
 

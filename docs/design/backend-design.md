@@ -22,7 +22,7 @@ The backend accepts requests from the browser, owns all database writes, and sav
 | [chat.py](../../backend/chat.py) | `send_message`, `list_messages` | Persist questions, image associations, and current metadata replies |
 | [db.py](../../backend/db.py) | `initialize_db`, `db_connection` | SQLite tables, incremental schema initialization, transaction scope |
 | [schemas.py](../../backend/schemas.py) | Pydantic request models | JSON field validation |
-| [config.py](../../backend/config.py) | `FRAME_DATA_DIR`, size constants | Storage paths and upload limits |
+| [config.py](../../backend/config.py) | `DATA_DIR`, `UPLOAD_DIR`, `IMAGE_DIR`, `DB_PATH`, size constants | Storage paths from `FRAME_DATA_DIR` and upload limits |
 
 ```mermaid
 flowchart LR
@@ -40,7 +40,7 @@ flowchart LR
 
 1. Login verifies an active account and its password hash. It creates an opaque cookie token and stores the token's SHA-256 digest in `auth_sessions`.
 2. Requests with `frame_session` are authenticated against the stored digest, expiry, and active user.
-3. Writes must also supply the returned `X-CSRF-Token`.
+3. Protected writes must send the JSON `csrf_token` returned by login or `/api/me` in the `X-CSRF-Token` header. Login itself is exempt.
 4. An upload owner is read from `uploads.user_id`. A conversation's owner is resolved through `jobs.upload_id -> uploads.user_id`. Image and message requests use that same conversation ownership.
 
 | Setting | Current behavior |
@@ -79,7 +79,7 @@ JSON requests use `Content-Type: application/json`. Video chunks and images use 
 | POST | `/api/uploads/{upload_id}/complete` | Upload ID | Upload fields with `status=complete` |
 | GET | `/api/jobs` | Cookie | `jobs[]`: ID, upload ID, filename, status, creation time |
 | POST | `/api/jobs` | `upload_id`, `entities`, `instructions` | **201**: `id`, `session_id`, `upload_id`, `status` |
-| GET | `/api/jobs/{job_id}` | Conversation ID | ID, session ID, status, entities, instructions, metadata, error |
+| GET | `/api/jobs/{job_id}` | Conversation ID | ID, session ID, upload ID, status, entities, instructions, metadata, error |
 
 ### Images and messages
 

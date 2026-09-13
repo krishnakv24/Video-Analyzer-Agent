@@ -111,7 +111,7 @@ These are deployment settings to implement, not a report of resources currently 
 
 | Resource | Selected design | Reason |
 | --- | --- | --- |
-| Application image | Python runtime, requirements, `main.py`, `backend/`, `frontend/`; include `ffprobe` for duration | Package the existing application and its runtime tools |
+| Application image | Python runtime, requirements, `main.py`, `backend/`, `frontend/`, `manage_users.py`, `cleanup_data.py`; include `ffprobe` for duration | Package the application, maintenance commands, and runtime tools |
 | Application process | `uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1`; no `--reload` | Upload locks and preparation ownership currently belong to one process |
 | Compute host | Ubuntu Kubernetes node with persistent host disk and GPU hardware | Frontend/backend run on CPU; they do not reserve GPU devices or need CUDA for current behavior |
 | Deployment | One replica; `Recreate` update strategy | Avoid old/new application pods overlapping during normal upgrades; upgrades cause a brief outage |
@@ -135,8 +135,8 @@ Configure the chosen ingress to accept **at least 20 MiB image bodies** and 8 Mi
 | Event | What survives | What the user or operator does |
 | --- | --- | --- |
 | Browser refresh | Saved database records and received video bytes | Reopen the session; reselect an interrupted video to resume |
-| Application container restart | Data on the mounted host directory | Browser retries interrupted transfers; startup reschedules unfinished metadata preparation |
-| Image / pod replacement | Same host data if the PVC is retained | Reattach the existing claim and keep the single-writer rule |
+| Application container restart | Data on the mounted host directory | Retry a failed draft; automatic chunk recovery needs a successful status query. Startup reschedules unfinished metadata preparation |
+| Container image / pod replacement | Same host data if the PVC is retained | Reattach the existing claim and keep the single-writer rule |
 | Storage host unavailable | Files remain tied to that host | Restore the host or recover from backup; automatic cross-node failover is not provided |
 | Manual cleanup | Accounts stay unless explicitly included | Stop the application, preview cleanup, then execute only the intended reset |
 

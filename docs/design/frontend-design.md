@@ -1,7 +1,9 @@
 # Frame frontend design
 
-> **Frontend LLD · Browser interface and interaction behavior**  
-> Scope: sign-in, conversations, video uploads, status, chat, and image attachments.  
+> **Frontend LLD · Browser interface and interaction behavior**
+>
+> Scope: sign-in, conversations, video uploads, status, chat, and image attachments.
+>
 > Baseline: current repository implementation, reviewed 13 September 2026.
 
 Frame gives each signed-in user a workspace of conversations. Each saved conversation contains one video and its follow-up messages. A user can upload another video in a new conversation while an earlier upload continues.
@@ -27,12 +29,9 @@ The browser selects files, transfers bytes, and displays backend responses. It d
 ```mermaid
 flowchart LR
     A[Sign in] --> B[New conversation]
-    B --> C[Choose video and filters]
-    C --> D[Upload video]
-    D --> E[Wait for preparation]
-    E --> F[Ask questions]
-    F --> G[Attach images to a question]
-    G --> F
+    B --> C[Upload video]
+    C --> D[Wait for preparation]
+    D --> E[Chat and images]
 ```
 
 1. **Sign in.** The backend restores the user's saved conversations. If available, the browser opens the last selected conversation.
@@ -118,7 +117,7 @@ The deployment design keeps these static files in the FastAPI application contai
 | `frameUpload:{userId}:{name}:{size}:{lastModified}` | `localStorage` entry containing a resumable upload ID | Yes, while browser storage is retained. It does not contain video bytes. |
 | `frameLastJob:{userId}` | `localStorage` entry containing the preferred saved conversation ID | Yes. It is a UI preference, not authorization. |
 
-These are the shapes of the two main browser records. They are plain JavaScript objects, **not implemented classes**; the class notation makes their fields and containment explicit.
+These are the shapes of the two main browser records. They are plain JavaScript objects, **not implemented classes**; the class notation makes their fields and containment explicit. Active IDs are nullable, and `uploadedId` is null until an image upload succeeds.
 
 ```mermaid
 classDiagram
