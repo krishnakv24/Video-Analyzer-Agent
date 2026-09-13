@@ -17,6 +17,7 @@ The backend accepts requests from the browser, owns all database writes, and sav
 | [auth.py](../../backend/auth.py) | `protect_api`, `authenticate`, `login` | Session cookies, CSRF, user ownership |
 | [uploads.py](../../backend/uploads.py) | `create_upload`, `append_upload`, `complete_upload`, `lock_for` | Ordered, resumable video transfer |
 | [jobs.py](../../backend/jobs.py) | `create_job`, `preprocess_video`, `job_status` | Video-to-conversation mapping and preparation status |
+| [conversation_deletion.py](../../backend/conversation_deletion.py) | `delete_conversation` | Owner-scoped conversation deletion, staged media removal, rollback and purge reporting |
 | [video_metadata.py](../../backend/video_metadata.py) | `inspect_video` | Read the file, calculate SHA-256, optionally obtain duration |
 | [images.py](../../backend/images.py) | `upload_image`, `image_response`, `get_image` | Validate images, persist file references, serve authorized bytes |
 | [chat.py](../../backend/chat.py) | `send_message`, `list_messages` | Persist questions, image associations, and current metadata replies |
@@ -80,6 +81,7 @@ JSON requests use `Content-Type: application/json`. Video chunks and images use 
 | GET | `/api/jobs` | Cookie | `jobs[]`: ID, upload ID, filename, status, creation time |
 | POST | `/api/jobs` | `upload_id`, `entities`, `instructions` | **201**: `id`, `session_id`, `upload_id`, `status` |
 | GET | `/api/jobs/{job_id}` | Conversation ID | ID, session ID, upload ID, status, entities, instructions, metadata, error |
+| DELETE | `/api/jobs/{job_id}` | Conversation ID; cookie + CSRF | **200**: `status: "deleted"`, `id`, `cleanup_pending` |
 
 ### Images and messages
 
@@ -91,7 +93,7 @@ JSON requests use `Content-Type: application/json`. Video chunks and images use 
 | POST | `/api/jobs/{job_id}/messages` | `content`, `image_ids[]` | **201**: assistant message plus `user_message` |
 | GET | `/api/jobs/{job_id}/messages` | Conversation ID | `messages[]` ordered by ID, with timestamps and image metadata |
 
-There is no public video-download, cancel-upload, delete-session, or retry-failed-preparation endpoint. FastAPI also exposes `/docs` and `/openapi.json`; raw streamed bodies do not have typed Pydantic response/request contracts for every field.
+There is no public video-download, cancel-upload, or retry-failed-preparation endpoint. FastAPI also exposes `/docs` and `/openapi.json`; raw streamed bodies do not have typed Pydantic response/request contracts for every field.
 
 <details>
 <summary><strong>Example: create a conversation and use its response</strong></summary>
@@ -153,11 +155,14 @@ sequenceDiagram
 
 The browser uses `File.slice()` to send at most **8 MiB** per PATCH. The server streams pieces from that request to disk; it does not hold the full video in memory. The default maximum is **250 GiB per video**. The file's original name is display metadata, while a server-generated UUID supplies the stored filename.
 
+Uploads started in different New conversations use independent `POST /api/uploads` requests and receive distinct upload IDs, even for matching file metadata. Resume is tied to the upload ID saved in the explicitly selected browser draft. Neither the backend nor the new-conversation flow deduplicates videos by filename, size, or modification time. The browser checks that metadata when a user reselects a file for a paused draft; it cannot prove that the file contents are identical.
+
 A `WeakValueDictionary` holds per-upload `asyncio.Lock` objects. Different video requests may progress concurrently; requests for the same upload must take turns. `write`, `fsync`, and SQLite operations run synchronously inside the async handler. Consequently, one process can interleave network transfers but may pause its event loop during disk/SQL work. Neither one thread per video nor multiple parallel chunks for one video are used by this browser.
 
 ### Resume and completion
 
 - The committed database offset is the recovery point. After an unsuccessful PATCH response, the browser queries the upload and accepts a newer saved offset or retries, up to three chunk attempts. A failed status query ends that retry path.
+- After refresh, the user selects a restored Resume upload draft and reselects its original file. That draft supplies the existing upload ID; starting a New conversation instead creates a separate upload. Per-draft browser persistence and optional Web Locks are described in the [frontend LLD](frontend-design.md#43-refresh-and-session-creation).
 - A new PATCH trims any trailing, uncommitted bytes before writing at the saved offset. Stream/write exceptions attempt immediate truncation. `flush`/`fsync` exceptions are outside that truncation handler, so a later retry performs reconciliation.
 - Completion requires the offset and file length to equal the declared size. The file is renamed and the database status is then committed. Repeated completion returns success once the row is `complete`.
 - `jobs.upload_id` has a unique index. Retrying session creation returns 409 if the job already exists; the frontend can find it in the user's job list. Upload records are independent from session creation and may exist without any job.
@@ -241,6 +246,32 @@ The response below abbreviates each image to the rendering fields; the actual im
 Image `3333...` receives `message_id=11`. Its bytes live at `/data/images/2222.../3333....png`; the browser uses the protected API URL, never the host file path.
 
 </details>
+
+### Delete one conversation
+
+`DELETE /api/jobs/{job_id}` uses the existing cookie authentication, CSRF check, and session ownership middleware. `delete_conversation()` checks ownership again within a `BEGIN IMMEDIATE` transaction. A missing or foreign conversation returns **404**; a `queued` or `preprocessing` conversation returns **409** so preparation cannot race with deletion. Ready and failed conversations can be deleted.
+
+```mermaid
+sequenceDiagram
+    participant UI as Browser confirmation
+    participant API as Conversation deletion
+    participant DB as SQLite
+    participant Files as Host media
+    UI->>API: DELETE job with cookie and CSRF
+    API->>DB: Begin write transaction, check owner and state
+    API->>Files: Validate paths and rename files to quarantine names
+    API->>DB: Delete images, messages, job and upload; commit
+    API->>Files: Remove quarantined files
+    API-->>UI: 200 deleted, id, cleanup_pending
+```
+
+The deletion covers the selected upload's `.video` and `.part` files if present, every registered image in the session (attached or still without a `message_id`), the session's image and message rows, its job row, and its upload row. User accounts, authentication sessions, other conversations, and untracked files remain. The image directory is removed only if empty. Candidate paths are validated before any move, with traversal, symlinks, and junctions rejected.
+
+Each existing file is renamed beside its original location to `.deleted-{operation_id}-{filename}`. Staging and SQL failures roll back the transaction and attempt to restore those names in reverse order. A normal failure returns **500** with an error saying conversation data was not removed; failed restoration instead reports that administrator recovery is needed. After the database commit, failed file removal returns **200** with `cleanup_pending: true`: the conversation is already deleted, but quarantined bytes remain and the server logs their paths. Successful removal returns `cleanup_pending: false`.
+
+An abrupt process exit between staging and commit bypasses this rollback handler and can leave database records pointing to renamed files. There is no automatic quarantine recovery or purge retry. An administrator must inspect the records and logged paths to restore or remove the affected files. The global cleanup script does not discover these files once their database rows are gone.
+
+Image finalization and message insertion also acquire `BEGIN IMMEDIATE` and recheck the session before saving. An image request can receive its body without holding the write transaction; if deletion finishes before its final save, it cannot recreate the removed session's records. These checks coordinate application writes, but do not make disk and database operations one atomic transaction.
 
 ## 6. Data model and class diagrams
 
@@ -368,6 +399,9 @@ classDiagram
 | Missing/short stored file | 500 | Offset retry cannot reconstruct missing host bytes |
 | Crash between file rename and DB commit | May leave file complete but row uploading | No automatic completion reconciliation for this case |
 | Image DB insert exception | Attempts to remove its just-written image file | Process crashes can still leave orphan files |
+| Delete during preparation | 409; conversation remains | Wait for queued/preprocessing work to finish |
+| Deletion staging or SQL failure | 500; SQL rollback and media restoration attempted | A failed restore or abrupt exit can require administrator recovery |
+| Deletion final purge failure | 200 with `cleanup_pending: true`; rows are already deleted | Quarantined media needs manual cleanup; no automatic purge retry |
 | Chat response lost | Database may already contain both messages | No request idempotency key; blindly retrying can duplicate text or reject already-attached images |
 | Many active sessions | Lists and message histories are returned in full | No pagination or measured load capacity |
 | Pod restart | Host data survives; unfinished preparation is rescheduled | No cross-process locks; deployment must retain one backend writer |
@@ -379,4 +413,4 @@ All records and media must use the same mounted `/data` directory in Docker/Kube
 
 [cleanup_data.py](../../cleanup_data.py) previews by default. `--execute` deletes session/upload/message/image/login rows while keeping accounts unless `--include-users` is supplied. It then deletes referenced files; the database file/schema remain. It does not scan all orphan media. Database commit precedes file removal, so errors can leave files whose rows are gone. Stop the application before cleanup: this is an operator requirement, not a reliable process-running check enforced by the script. For this deployment, run maintenance with the application stopped and the same host volume mounted.
 
-[test_auth.py](../../tests/test_auth.py) covers account isolation, separate sessions, independent small upload streams, and chat/image mapping. [test_cleanup.py](../../tests/test_cleanup.py) covers preview and execution while preserving users. Kubernetes restart, disk exhaustion, crash recovery, and large-video throughput remain deployment acceptance work; these documents do not claim those tests have passed.
+[test_auth.py](../../tests/test_auth.py) covers account isolation, separate sessions, independent small upload streams, chat/image mapping, deletion authorization, preparation guards, rollback, purge warnings, and an image upload overlapping deletion. [test_cleanup.py](../../tests/test_cleanup.py) covers preview and execution while preserving users. Kubernetes restart, disk exhaustion, process-crash recovery, and large-video throughput remain deployment acceptance work; these documents do not claim those tests have passed.

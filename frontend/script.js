@@ -8,7 +8,6 @@ const result = document.querySelector('#analysis-result');
 let currentFile = null;
 const uploadDrafts = new Map();
 let activeDraftId = null;
-let nextDraftId = 0;
 let activeJobId = null;
 let jobTimer = null;
 let messageTimer = null;
@@ -44,6 +43,39 @@ const cancelDelete = document.querySelector('#cancel-delete');
 let menuTarget = null;
 let deleteTarget = null;
 let deleteInProgress = false;
+const navigationToggle = document.querySelector('#toggle-navigation');
+const workspaceNavigation = document.querySelector('#workspace-navigation');
+const mobileLayout = window.matchMedia('(max-width: 900px)');
+
+function setNavigationOpen(open) {
+  document.querySelector('.sidebar').classList.toggle('navigation-open', open);
+  navigationToggle.setAttribute('aria-expanded', String(open));
+  navigationToggle.setAttribute('aria-label', open ? 'Hide conversations' : 'Show conversations');
+  if (!open) closeConversationMenu();
+}
+
+function closeMobileNavigation() {
+  if (!mobileLayout.matches) return;
+  const focusWasInside = workspaceNavigation.contains(document.activeElement);
+  setNavigationOpen(false);
+  if (focusWasInside) requestAnimationFrame(() => document.querySelector('#intro-title').focus({ preventScroll: true }));
+}
+
+navigationToggle.addEventListener('click', () => {
+  setNavigationOpen(navigationToggle.getAttribute('aria-expanded') !== 'true');
+});
+mobileLayout.addEventListener('change', () => {
+  const focusWasInside = workspaceNavigation.contains(document.activeElement);
+  setNavigationOpen(false);
+  if (mobileLayout.matches && focusWasInside) navigationToggle.focus();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && mobileLayout.matches && navigationToggle.getAttribute('aria-expanded') === 'true'
+    && !deleteDialog.open && conversationMenu.hidden) {
+    setNavigationOpen(false);
+    navigationToggle.focus();
+  }
+});
 
 async function api(url, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -58,8 +90,81 @@ async function api(url, options = {}) {
   return body;
 }
 
-function uploadKey(file) {
-  return `frameUpload:${currentUser.id}:${file.name}:${file.size}:${file.lastModified}`;
+function draftStorageKey(draft) {
+  return `frameUploadDraft:${draft.userId}:${draft.id}`;
+}
+
+function newDraftId() {
+  const id = crypto.randomUUID?.()
+    || Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  return `draft-${id}`;
+}
+
+function fileDetails(file) {
+  return { name: file.name, size: file.size, lastModified: file.lastModified };
+}
+
+function matchesDraftFile(draft, file) {
+  const info = draft.fileInfo;
+  return info.name === file.name && info.size === file.size
+    && (info.lastModified === null || info.lastModified === file.lastModified);
+}
+
+function persistDraft(draft) {
+  const { id, userId, uploadId, fileInfo, entities, instructions, progress, createdAt } = draft;
+  try {
+    localStorage.setItem(draftStorageKey(draft), JSON.stringify({ id, userId, uploadId, fileInfo, entities, instructions, progress, createdAt }));
+    return true;
+  } catch {
+    if (!draft.storageWarning) notifyUser('Browser storage is unavailable. Keep this tab open until your upload finishes.');
+    draft.storageWarning = true;
+    return false;
+  }
+}
+
+function forgetDraft(draft) {
+  try { localStorage.removeItem(draftStorageKey(draft)); }
+  catch { notifyUser('Could not remove the saved upload entry from this browser. It may appear again after a refresh.'); }
+}
+
+function restoreUploadDrafts(jobs) {
+  const prefix = `frameUploadDraft:${currentUser.id}:`;
+  const legacyPrefix = `frameUpload:${currentUser.id}:`;
+  let keys;
+  try { keys = Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index)); }
+  catch { return; }
+  for (const key of keys) {
+    if (!key?.startsWith(prefix) && !key?.startsWith(legacyPrefix)) continue;
+    try {
+      let saved;
+      if (key.startsWith(prefix)) {
+        saved = JSON.parse(localStorage.getItem(key));
+        if (!saved || saved.userId !== currentUser.id || typeof saved.id !== 'string'
+          || !saved.fileInfo || typeof saved.fileInfo.name !== 'string' || !(saved.fileInfo.size > 0)
+          || !Array.isArray(saved.entities) || typeof saved.instructions !== 'string') continue;
+        if (draftStorageKey(saved) !== key) continue;
+      } else {
+        // Convert old filename-based entries into explicitly selectable paused drafts.
+        const parts = key.slice(legacyPrefix.length).split(':');
+        const lastModified = Number(parts.pop());
+        const size = Number(parts.pop());
+        const name = parts.join(':');
+        const uploadId = localStorage.getItem(key);
+        if (!name || !(size > 0) || !Number.isFinite(lastModified) || !/^[a-f0-9-]{36}$/i.test(uploadId || '')) continue;
+        saved = { id: `draft-${uploadId}`, userId: currentUser.id, uploadId,
+          fileInfo: { name, size, lastModified }, entities: ['People', 'Cars'], instructions: '', progress: 0, createdAt: Date.now() };
+      }
+      if (jobs.some(job => job.upload_id === saved.uploadId)) {
+        localStorage.removeItem(key);
+        continue;
+      }
+      if (uploadDrafts.has(saved.id)) continue;
+      const draft = createDraft(null, saved.entities, saved.instructions, saved, false);
+      if (key.startsWith(legacyPrefix) && persistDraft(draft)) localStorage.removeItem(key);
+    } catch {
+      // An invalid saved entry must not prevent the user's workspace from opening.
+    }
+  }
 }
 
 function showProgress(offset, size) {
@@ -69,21 +174,17 @@ function showProgress(offset, size) {
   progressLabel.textContent = `${percent}% uploaded`;
 }
 
-async function uploadVideo(file, onProgress) {
-  const key = uploadKey(file);
-  const legacyKey = `frameUpload:${file.name}:${file.size}:${file.lastModified}`;
+async function uploadVideo(draft, onProgress) {
+  const file = draft.file;
   let upload;
-  const oldId = localStorage.getItem(key) || localStorage.getItem(legacyKey);
-  if (oldId) {
+  if (draft.uploadId) {
     try {
-      upload = await api(`/api/uploads/${oldId}`);
+      upload = await api(`/api/uploads/${draft.uploadId}`);
       if (upload.size !== file.size) throw new Error('Upload size changed');
-      localStorage.setItem(key, oldId);
-      localStorage.removeItem(legacyKey);
     } catch (error) {
       if (error.status !== 404) throw error;
-      localStorage.removeItem(key);
-      localStorage.removeItem(legacyKey);
+      draft.uploadId = null;
+      persistDraft(draft);
     }
   }
   if (!upload) {
@@ -91,7 +192,8 @@ async function uploadVideo(file, onProgress) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename: file.name, size: file.size })
     });
-    localStorage.setItem(key, upload.id);
+    draft.uploadId = upload.id;
+    persistDraft(draft);
   }
   let offset = upload.offset;
   onProgress(offset, file.size);
@@ -115,33 +217,41 @@ async function uploadVideo(file, onProgress) {
     onProgress(offset, file.size);
   }
   if (upload.status !== 'complete') await api(`/api/uploads/${upload.id}/complete`, { method: 'POST' });
-  return { id: upload.id, storageKey: key };
+  return { id: upload.id };
 }
 
 function renderDraft(draft) {
-  draft.button.querySelector('small').textContent = draft.status === 'failed'
-    ? 'Upload failed · select to retry'
-    : `Uploading ${draft.progress}%`;
+  const started = new Date(draft.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  draft.button.querySelector('small').textContent = draft.status === 'paused'
+    ? `Resume upload · ${started}` : draft.status === 'failed'
+      ? 'Upload failed · select to retry' : `Uploading ${draft.progress}%`;
   draft.button.classList.toggle('active', activeDraftId === draft.id);
 }
 
-function createDraft(file, entities, instructions) {
+function createDraft(file, entities, instructions, saved = null, activate = true) {
   const draft = {
-    id: `draft-${++nextDraftId}`, file, entities, instructions,
-    progress: 0, status: 'uploading', error: ''
+    id: newDraftId(), userId: currentUser.id, uploadId: null,
+    fileInfo: file ? fileDetails(file) : null, entities, instructions,
+    progress: 0, createdAt: Date.now(), ...saved, file,
+    status: file ? 'uploading' : 'paused', error: ''
   };
   const button = document.createElement('button');
   button.type = 'button';
-  button.className = 'conversation active';
+  button.className = `conversation${activate ? ' active' : ''}`;
+  button.dataset.draftId = draft.id;
   button.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg><span class="conversation-copy"><strong></strong><small></small></span>';
-  button.querySelector('strong').textContent = file.name.replace(/\.[^.]+$/, '');
+  button.querySelector('strong').textContent = draft.fileInfo.name.replace(/\.[^.]+$/, '');
+  button.title = `${draft.fileInfo.name} · ${new Date(draft.createdAt).toLocaleString()}`;
   button.addEventListener('click', () => showDraft(draft.id));
   draft.button = button;
   uploadDrafts.set(draft.id, draft);
-  activeDraftId = draft.id;
-  document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
+  if (activate) {
+    activeDraftId = draft.id;
+    document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
+  }
   document.querySelector('#conversation-list').prepend(button);
   renderDraft(draft);
+  if (!saved) persistDraft(draft);
   return draft;
 }
 
@@ -151,18 +261,18 @@ function showDraft(draftId) {
   clearVideo();
   activeDraftId = draftId;
   currentFile = draft.file;
-  document.querySelector('#file-name').textContent = draft.file.name;
-  document.querySelector('#file-meta').textContent = `${(draft.file.size / 1024 / 1024).toFixed(1)} MB · Video`;
+  document.querySelector('#file-name').textContent = draft.fileInfo.name;
+  document.querySelector('#file-meta').textContent = `${(draft.fileInfo.size / 1024 / 1024).toFixed(1)} MB · Video`;
   fileRow.hidden = false;
   document.querySelector('#instructions').value = draft.instructions;
   document.querySelectorAll('.entity-options input').forEach(input => {
     input.checked = draft.entities.includes(input.value);
   });
   showProgress(draft.progress, 100);
-  formMessage.textContent = draft.error;
+  formMessage.textContent = draft.error || (draft.file ? '' : 'Select the original video file below, then resume this upload.');
   const busy = draft.status === 'uploading';
   analyzeButton.disabled = busy;
-  analyzeButton.textContent = busy ? 'Uploading…' : 'Analyze video ↑';
+  analyzeButton.textContent = busy ? 'Uploading…' : 'Resume upload ↑';
   fileInput.disabled = busy;
   document.querySelector('#remove-file').disabled = busy;
   document.querySelectorAll('.conversation').forEach(item => item.classList.remove('active'));
@@ -170,56 +280,70 @@ function showDraft(draftId) {
 }
 
 async function runUpload(draft) {
-  const { file, entities, instructions } = draft;
   try {
-    const upload = await uploadVideo(file, (offset, size) => {
-      draft.progress = Math.round(offset / size * 100);
-      renderDraft(draft);
-      if (activeDraftId === draft.id) showProgress(offset, size);
-    });
-    let job;
-    try {
-      job = await api('/api/jobs', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ upload_id: upload.id, entities, instructions })
+    if (navigator.locks) {
+      await navigator.locks.request(`frame-upload:${draft.userId}:${draft.id}`, { ifAvailable: true }, async lock => {
+        if (!lock) throw new Error('This conversation is uploading in another tab. Return to that tab, or start a New conversation for another video.');
+        await transferDraft(draft);
       });
-    } catch (error) {
-      if (error.status !== 409) throw error;
-      job = (await api('/api/jobs')).jobs.find(item => item.upload_id === upload.id);
-      if (!job) throw error;
+    } else {
+      await transferDraft(draft);
     }
-    localStorage.removeItem(upload.storageKey);
-    const selected = activeDraftId === draft.id;
-    uploadDrafts.delete(draft.id);
-    draft.button.remove();
-    addConversation(file.name.replace(/\.[^.]+$/, ''), job.id, selected);
-    if (selected) openJob(job.id);
-    notifyUser(`${file.name} uploaded. Background preprocessing has started.`, true);
   } catch (error) {
     draft.status = 'failed';
-    draft.error = `${error.message}. Select this conversation and retry with the same file.`;
+    draft.error = error.message;
     renderDraft(draft);
-    if (activeDraftId === draft.id) formMessage.textContent = draft.error;
-  } finally {
-    if (activeDraftId === draft.id) {
-      const busy = draft.status === 'uploading';
-      analyzeButton.disabled = busy;
-      analyzeButton.innerHTML = 'Analyze video <span aria-hidden="true">↑</span>';
-      fileInput.disabled = busy;
-      document.querySelector('#remove-file').disabled = busy;
-    }
+    if (activeDraftId === draft.id) showDraft(draft.id);
   }
+}
+
+async function transferDraft(draft) {
+  const { file, entities, instructions } = draft;
+  // Another tab may have advanced this draft since this page restored it.
+  try {
+    const saved = JSON.parse(localStorage.getItem(draftStorageKey(draft)));
+    if (saved?.uploadId) draft.uploadId = saved.uploadId;
+  } catch { /* Browser storage is optional while the tab remains open. */ }
+  persistDraft(draft);
+  const upload = await uploadVideo(draft, (offset, size) => {
+    draft.progress = Math.round(offset / size * 100);
+    persistDraft(draft);
+    renderDraft(draft);
+    if (activeDraftId === draft.id) showProgress(offset, size);
+  });
+  let job;
+  try {
+    job = await api('/api/jobs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ upload_id: upload.id, entities, instructions })
+    });
+  } catch (error) {
+    if (error.status !== 409) throw error;
+    job = (await api('/api/jobs')).jobs.find(item => item.upload_id === upload.id);
+    if (!job) throw error;
+  }
+  forgetDraft(draft);
+  const selected = activeDraftId === draft.id;
+  uploadDrafts.delete(draft.id);
+  draft.button.remove();
+  addConversation(file.name.replace(/\.[^.]+$/, ''), job.id, selected);
+  if (selected) openJob(job.id);
+  notifyUser(`${file.name} uploaded. Background preprocessing has started.`, true);
 }
 
 async function showWorkspace(user) {
   const response = await api('/api/jobs');
   currentUser = user;
   csrfToken = user.csrf_token;
+  clearVideo();
+  uploadDrafts.clear();
+  activeDraftId = null;
   document.querySelector('#account-name').textContent = user.username;
   document.querySelector('#avatar').textContent = user.username.charAt(0).toUpperCase();
   const list = document.querySelector('#conversation-list');
   list.replaceChildren();
   [...response.jobs].reverse().forEach(job => addConversation(job.filename.replace(/\.[^.]+$/, ''), job.id));
+  restoreUploadDrafts(response.jobs);
   const remembered = localStorage.getItem(`frameLastJob:${user.id}`);
   const selected = response.jobs.find(job => job.id === remembered) || response.jobs[0];
   loginScreen.hidden = true;
@@ -233,7 +357,7 @@ function notifyUser(message, browserNotification = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.hidden = true; }, 6500);
   if (browserNotification && 'Notification' in window && Notification.permission === 'granted') {
-    new Notification('Frame', { body: message });
+    new Notification('VideoLens', { body: message });
   }
 }
 
@@ -317,6 +441,7 @@ async function refreshJob() {
 }
 
 function openJob(jobId) {
+  closeMobileNavigation();
   closeConversationMenu();
   clearPendingImages();
   activeDraftId = null;
@@ -378,6 +503,7 @@ function clearPendingImages() {
 }
 
 function clearVideo() {
+  closeMobileNavigation();
   closeConversationMenu();
   activeDraftId = null;
   currentFile = null;
@@ -449,7 +575,9 @@ document.addEventListener('keydown', event => {
   }
 });
 window.addEventListener('resize', () => closeConversationMenu());
-document.addEventListener('scroll', () => closeConversationMenu(), true);
+// Close on user scrolling, not delayed scroll events from focus restoration.
+document.addEventListener('wheel', () => closeConversationMenu(), { passive: true });
+document.addEventListener('touchmove', () => closeConversationMenu(), { passive: true });
 
 document.querySelector('#delete-conversation').addEventListener('click', () => {
   if (!menuTarget) return;
@@ -597,6 +725,7 @@ document.querySelector('#sign-out').addEventListener('click', async () => {
   try { await api('/api/auth/logout', { method: 'POST' }); }
   catch (error) { notifyUser(`Could not sign out: ${error.message}`); return; }
   clearVideo();
+  uploadDrafts.clear();
   currentUser = null;
   csrfToken = null;
   loginForm.reset();
@@ -626,6 +755,13 @@ fileInput.addEventListener('change', () => {
   const file = fileInput.files[0];
   if (!file) return;
   if (!file.type.startsWith('video/')) { formMessage.textContent = 'Choose a video file.'; fileInput.value = ''; return; }
+  const draft = uploadDrafts.get(activeDraftId);
+  if (draft && !matchesDraftFile(draft, file)) {
+    formMessage.textContent = 'Select the original video to resume this upload. Use New conversation to upload a different video.';
+    fileInput.value = '';
+    return;
+  }
+  if (draft) draft.file = file;
   currentFile = file;
   document.querySelector('#file-name').textContent = file.name;
   document.querySelector('#file-meta').textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · Video`;
@@ -638,6 +774,7 @@ document.querySelector('#remove-file').addEventListener('click', () => {
   if (activeDraftId) {
     const draft = uploadDrafts.get(activeDraftId);
     if (draft?.status === 'uploading') return;
+    if (draft) forgetDraft(draft);
     draft?.button.remove();
     uploadDrafts.delete(activeDraftId);
   }
@@ -656,13 +793,14 @@ document.querySelector('#analysis-form').addEventListener('submit', async event 
   if (!currentFile) { formMessage.textContent = 'Add a video before starting analysis.'; fileInput.focus(); return; }
   const entities = [...document.querySelectorAll('.entity-options input:checked')].map(input => input.value);
   if (!entities.length) { formMessage.textContent = 'Select at least one entity.'; return; }
-  if ([...uploadDrafts.values()].some(draft => draft.status === 'uploading' && uploadKey(draft.file) === uploadKey(currentFile))) {
-    formMessage.textContent = 'This file is already uploading in another conversation.';
+  const existingDraft = uploadDrafts.get(activeDraftId);
+  if (existingDraft && !matchesDraftFile(existingDraft, currentFile)) {
+    formMessage.textContent = 'Select the original video to resume this upload. Use New conversation to upload a different video.';
     return;
   }
   formMessage.textContent = '';
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
-  const draft = activeDraftId ? uploadDrafts.get(activeDraftId) : createDraft(currentFile, entities, document.querySelector('#instructions').value);
+  const draft = existingDraft || createDraft(currentFile, entities, document.querySelector('#instructions').value);
   draft.file = currentFile;
   draft.entities = entities;
   draft.instructions = document.querySelector('#instructions').value;

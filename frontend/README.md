@@ -1,4 +1,6 @@
-# Frame video upload prototype
+# VideoLens video upload prototype
+
+VideoLens is the browser-facing name. Existing internal names such as `frame_session`, `frameUploadDraft`, and `FRAME_DATA_DIR` remain unchanged so current login, resume, and storage data stay compatible.
 
 Start with the [architecture HLD](../docs/architecture.md) for the Ubuntu, Docker, Kubernetes, and host-storage design. The [frontend LLD](../docs/design/frontend-design.md) covers screens, screenshots, and interactions; the [backend LLD](../docs/design/backend-design.md) covers APIs, session mapping, and class diagrams.
 
@@ -17,6 +19,20 @@ To run the API tests, install `requirements.txt`, then run `python -m unittest d
 
 Open `http://127.0.0.1:8000/` for the page and `http://127.0.0.1:8000/docs` for the API. The page must be opened through FastAPI to upload files; opening `index.html` directly will not provide the API.
 
+**Test on a phone on the same network:** activate the virtual environment on the computer. If the local server is already using port 8000, stop it and restart from the repository root with:
+
+```shell
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+```
+
+Connect the phone and computer to the same Wi-Fi network. Find the computer's LAN address with `ipconfig` on Windows (the Wi-Fi adapter's IPv4 address) or `hostname -I` on Ubuntu. On the phone, open **`http://<computer-LAN-IP>:8000`**, for example `http://192.168.1.25:8000`. `localhost` on the phone points to the phone itself; `0.0.0.0` is the server's listening address, not the address to enter in the browser. If access is blocked, allow inbound TCP port 8000 for the private network in the computer's firewall and check that the Wi-Fi network permits devices to communicate. This is a local-network test; it does not require router port forwarding.
+
+The UI and API load from the same address, using relative `/api/...` URLs, so no CORS change is needed. Phone-selected video bytes travel over Wi-Fi to the computer's backend storage. On plain LAN HTTP, secure-context features such as browser notifications and Web Locks may be unavailable; the upload flow can run without them. Use HTTPS for deployment beyond this local test.
+
+**Screen layout:** desktop shows a sidebar; at 900 px wide and below, **Show conversations** expands the navigation below the compact header. Selecting a conversation/draft or New conversation collapses it; Escape also closes it. The list scrolls vertically, and phone upload/chat controls wrap to fit. Normal vertical page scrolling keeps long forms and conversation content reachable; fitting the screen does not mean every control must appear without scrolling.
+
+The upload regression suite is [tests/frontend_uploads.cjs](../tests/frontend_uploads.cjs). With the app running and Playwright plus Microsoft Edge available, run `node tests/frontend_uploads.cjs`. It passed with mocked API responses for parallel byte transfers, independent prompts, refresh/resume, legacy records, and cross-tab locking. It does not benchmark a 24-hour video or measure Wi-Fi/server throughput. The script header documents optional browser/module paths.
+
 The project keeps browser and server code separate:
 
 ```text
@@ -24,6 +40,7 @@ frontend/           HTML, CSS, JavaScript, and browser assets
 backend/auth.py     Sign-in, session cookies, and access control
 backend/uploads.py  Resumable video upload API
 backend/jobs.py     Video sessions and preprocessing
+backend/conversation_deletion.py  Conversation deletion and staged media cleanup
 backend/images.py   Image upload and protected image delivery
 backend/chat.py     Conversation API
 backend/video_metadata.py  Local checksum and duration extraction
@@ -39,11 +56,13 @@ The service-to-service request format, authentication, and shared storage locati
 
 See [docs/architecture.md](../docs/architecture.md) for the separate-service boundary and a proposed internal request format.
 
-The browser sends video data in 8 MiB chunks. If an upload is interrupted, reselect the **same file in the same browser** and press **Analyze video** to continue. FastAPI stores file bytes in `data/videos/` and upload/job metadata in `data/frame.sqlite3`. Set `FRAME_DATA_DIR` to move these files to a disk with enough free space. `data/` is ignored by Git. The configured maximum is 250 GiB per video; adjust `MAX_VIDEO_SIZE` in `backend/config.py` for your deployment.
+The browser sends video data in 8 MiB chunks. To continue an interrupted upload, select its **Resume upload** or failed draft in the sidebar, reselect the original video if needed, and resume that draft. Its filename, size, and last-modified time must match the saved selection; these checks do not prove content equality. FastAPI stores file bytes in `data/videos/` and upload/job metadata in `data/frame.sqlite3`. Set `FRAME_DATA_DIR` to move these files to a disk with enough free space. `data/` is ignored by Git. The configured maximum is 250 GiB per video; adjust `MAX_VIDEO_SIZE` in `backend/config.py` for your deployment.
 
-If the video reaches the server but session creation fails or its response is lost, retry with the same file. The page reuses the completed upload and finds an existing session instead of transferring the video again.
+If the video reaches the server but session creation fails or its response is lost, select and retry that same sidebar draft. The page reuses its completed upload and finds an existing session instead of transferring the video again. Starting a New conversation always starts a separate upload.
 
-You can start another conversation while a video is still uploading in the current tab. Each in-progress video appears in the sidebar with its own percentage; opening another conversation does not stop it. Uploads for different video IDs can advance concurrently, while chunks for the same video remain serialized. Keep the tab open until those transfers complete. After a refresh, reselect the same file to resume an interrupted upload.
+You can start another conversation while a video is still uploading in the current tab. Each upload started from **New conversation** receives a random draft ID and a separate server upload ID, including videos with identical names, sizes, and modification times. Each appears in the sidebar with its own percentage; opening another conversation does not stop it. Different videos advance concurrently while each video's chunks remain sequential. Keep the tab open while transferring.
+
+Draft metadata, filters, instructions, progress, and its upload ID are stored under a per-user `frameUploadDraft:<userId>:<draftId>` key; video bytes and browser `File` objects are not stored there. After refresh, the sidebar restores saved drafts as **Resume upload** rows. Select the intended row before reselecting the file. Successful session creation removes only that draft's saved key. Legacy filename-based resume entries migrate to explicit paused drafts. Where the browser supports Web Locks, the same draft cannot be transferred from two tabs at once; different drafts remain independent. Keep a resumed draft in one tab when Web Locks is unavailable.
 
 After the server saves the complete upload, it creates a unique `session_id` (the job UUID). Each session has exactly one video. The page notifies the user when upload completes. Initial preprocessing then runs on the backend: it streams the saved file to compute a SHA-256 checksum and reads duration when `ffprobe` is installed. The browser polls job status and sends another notification when preprocessing finishes; browser notifications are available if the user grants permission while the page is open. Chat opens when the session is ready, stores follow-up messages on the server, and can answer basic file metadata questions. **Visual detection and AI question answering are not connected yet.** The browser does not process video content; slicing into chunks is only for transfer.
 
@@ -52,6 +71,10 @@ After a session is created, use the **+** button beside the chat input to attach
 The chat can display images attached to stored messages. Producing assistant images from the separate algorithm service is deferred until that service is integrated.
 
 After a successful video upload, **Analyze video** stays disabled for that session. **Chat** becomes available when backend preprocessing reaches `ready`; it jumps to the conversation input. If the upload fails before a session is created, **Analyze video** is enabled again so the user can retry. Use **New conversation** to upload a different video into a new session.
+
+To delete a saved conversation, right-click its sidebar row, use its **ellipsis** menu, or focus the conversation button and press **Shift+F10**. Choose **Delete conversation**, then confirm or cancel. Confirmation removes that conversation's video, registered images (including unsent uploads), messages, and session/upload records. Other conversations and accounts remain. Deleting an inactive conversation keeps the current view; deleting the active one opens another saved conversation or New conversation. Preparation must finish before deletion is allowed. The dialog displays **Deleting…** while pending and keeps errors visible for retry. If the success toast warns that some files remain, the conversation is deleted but an administrator must clean up quarantined media; see the [backend recovery contract](../docs/design/backend-design.md#delete-one-conversation).
+
+The account-area icon is **Sign out**, not settings. Signing out keeps saved conversations. An open saved conversation now uses the subtitle “Ask follow-up questions and add reference images to explore your video.”
 
 Accounts are created by the server administrator. After installing dependencies, run these from the repository root and enter passwords at the prompt (minimum 12 characters):
 

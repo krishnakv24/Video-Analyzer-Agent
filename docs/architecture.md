@@ -24,8 +24,8 @@ flowchart LR
 ```
 
 - **One conversation = one video.** Follow-up questions and images stay with that conversation.
-- **More than one upload can run.** New conversation opens another upload form while earlier transfers continue.
-- **Saved work survives refresh and login.** The backend keeps completed sessions and their messages. An interrupted transfer resumes after the user selects the same file again.
+- **More than one upload can run.** Each upload started from New conversation has an independent draft and server upload ID, even when filenames, sizes, and modification times match. Earlier transfers continue.
+- **Saved work survives refresh and login.** The backend keeps completed sessions and their messages. Browser storage restores interrupted drafts as Resume upload rows; select the intended draft and reselect its original video to continue.
 - **Current preparation is metadata only.** It computes a checksum and optional video duration. Current chat answers metadata questions; recognition is not connected.
 
 ## 2. The architecture
@@ -75,6 +75,7 @@ The frontend and backend remain separate source folders. The application image p
 | Preparation | Poll the selected session; show its status | Compute SHA-256 and optional duration; persist ready/failed |
 | Follow-up images | Preview images beside the question; send on Submit | Validate image bytes; attach image records to that message |
 | Conversation history | Render text and protected image URLs | Persist and return only the signed-in user's session data |
+| Delete a conversation | Open its options menu, confirm deletion, update the selected view | Check ownership and preparation state; remove that conversation's rows and referenced media |
 | Maintenance | No maintenance UI | Administrator uses account and cleanup scripts |
 
 The browser handles presentation and transfer. File validation, storage, metadata preparation, and access checks belong to the backend.
@@ -105,6 +106,8 @@ User
 
 IDs and metadata live in SQLite; the video and image bytes live in files. See the [data model and class diagram](design/backend-design.md#6-data-model-and-class-diagrams) for exact relationships.
 
+A user can delete one saved conversation from its sidebar menu. This removes its video, all registered images (including images uploaded but not attached to a message), messages, and upload/session records. Accounts, login sessions, and other conversations remain. Preparation must finish before deletion is allowed. The backend stages media before committing the database deletion, then removes the staged files; [deletion recovery details](design/backend-design.md#delete-one-conversation) cover rollback and incomplete file cleanup.
+
 ## 5. Docker and Kubernetes deployment
 
 These are deployment settings to implement, not a report of resources currently running.
@@ -134,11 +137,12 @@ Configure the chosen ingress to accept **at least 20 MiB image bodies** and 8 Mi
 
 | Event | What survives | What the user or operator does |
 | --- | --- | --- |
-| Browser refresh | Saved database records and received video bytes | Reopen the session; reselect an interrupted video to resume |
+| Browser refresh | Saved database records, received video bytes, and locally saved draft details | Reopen a session, or select its Resume upload draft and reselect the original video |
 | Application container restart | Data on the mounted host directory | Retry a failed draft; automatic chunk recovery needs a successful status query. Startup reschedules unfinished metadata preparation |
 | Container image / pod replacement | Same host data if the PVC is retained | Reattach the existing claim and keep the single-writer rule |
 | Storage host unavailable | Files remain tied to that host | Restore the host or recover from backup; automatic cross-node failover is not provided |
 | Manual cleanup | Accounts stay unless explicitly included | Stop the application, preview cleanup, then execute only the intended reset |
+| Delete one conversation | Accounts and other conversations remain | Confirm in the sidebar menu; a file-cleanup warning requires administrator attention |
 
 The file system and SQLite are separate persistence operations. Recovery works for saved upload offsets, but the code does not provide an atomic transaction covering both files and database rows. Specific failure cases are recorded in the [backend recovery notes](design/backend-design.md#7-failure-handling-and-operational-limits).
 

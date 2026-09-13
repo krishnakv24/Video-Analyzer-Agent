@@ -64,8 +64,9 @@ def delete_conversation(job_id: str, user_id: str) -> dict:
             if upload_id != row["upload_id"]:
                 raise ValueError("Invalid stored upload ID")
             paths = [_media_path(UPLOAD_DIR, f"{upload_id}.{suffix}") for suffix in ("video", "part")]
+            images = db.execute("SELECT stored_name FROM images WHERE session_id = ?", (job_id,)).fetchall()
             paths.extend(_media_path(IMAGE_DIR, job_id, image["stored_name"])
-                         for image in db.execute("SELECT stored_name FROM images WHERE session_id = ?", (job_id,)))
+                         for image in images)
             # Validate every candidate before moving any media. Renames stay on
             # the same filesystem even when videos and images use separate mounts.
             for path in dict.fromkeys(paths):

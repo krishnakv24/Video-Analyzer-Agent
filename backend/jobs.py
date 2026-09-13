@@ -59,6 +59,8 @@ def create_job(payload: JobCreate, background_tasks: BackgroundTasks, request: R
                for entity in payload.entities):
         raise HTTPException(422, "Unsupported entity")
     with db_connection() as db:
+        # Keep the upload check and session insert atomic with conversation deletion.
+        db.execute("BEGIN IMMEDIATE")
         upload = get_upload(db, payload.upload_id)
         if upload["user_id"] != request.state.user_id:
             raise HTTPException(404, "Upload not found")

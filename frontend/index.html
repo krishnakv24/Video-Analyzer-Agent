@@ -2,17 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Frame — Video analysis workspace</title>
-  <link rel="stylesheet" href="styles.css?v=3">
-  <link rel="stylesheet" href="upload.css?v=5">
-  <script src="script.js?v=9" defer></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>VideoLens — Video analysis workspace</title>
+  <link rel="stylesheet" href="styles.css?v=4">
+  <link rel="stylesheet" href="upload.css?v=6">
+  <script src="script.js?v=11" defer></script>
 </head>
 <body>
   <main id="login-screen" class="login-screen">
     <section class="login-story" aria-label="About Frame">
       <div class="story-content">
-        <div class="brand brand-large"><span class="brand-mark" aria-hidden="true"><span></span></span><span>frame</span></div>
+        <div class="brand brand-large"><span class="brand-mark" aria-hidden="true"><span></span></span><span>VideoLens</span></div>
         <div class="story-heading"><h1>Understand<br>every moment.</h1><p>Your video analysis workspace.</p></div>
         <img class="story-art" src="assets/video-preview.jpg" alt="Previews of videos ready for analysis">
         <div class="story-footer"><span class="footer-rule"></span><span>WATCH&nbsp;&nbsp; ANALYZE&nbsp;&nbsp; EXPLORE&nbsp;&nbsp; DEEPER</span></div>
@@ -36,23 +36,26 @@
 
   <main id="workspace-screen" class="workspace-screen" hidden>
     <aside class="sidebar">
-      <div class="brand"><span>frame</span></div>
-      <button id="new-conversation" class="primary new-conversation" type="button"><span class="plus">+</span>New conversation</button>
+      <div class="brand"><span>VideoLens</span></div>
+      <button id="new-conversation" class="primary new-conversation" type="button" title="New conversation" aria-label="New conversation"><span class="plus" aria-hidden="true">+</span><span class="new-conversation-label">New conversation</span></button>
+      <button id="toggle-navigation" class="navigation-toggle" type="button" aria-label="Show conversations" aria-controls="workspace-navigation" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+      <div id="workspace-navigation" class="workspace-navigation" aria-label="Conversations and account">
       <div class="workspace-label">YOUR WORKSPACE</div>
       <div id="conversation-list" class="conversation-list"></div>
-      <div class="sidebar-account"><div id="avatar" class="avatar">A</div><div class="account-copy"><strong id="account-name">Alex</strong><span>Local workspace</span></div><button id="sign-out" class="sign-out-button" type="button" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4M13 8l4 4-4 4M8 12h13"/></svg></button></div>
+      <div class="sidebar-account"><div id="avatar" class="avatar">A</div><div class="account-copy"><strong id="account-name">Alex</strong><span>Local workspace</span></div><button id="sign-out" class="sign-out-button" type="button" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4M16 8l4 4-4 4M9 12h11"/></svg></button></div>
+      </div>
     </aside>
     <section class="workspace-main">
       <header class="workspace-header"><label for="agent-select">SELECT AGENT</label><select id="agent-select"><option>Video Analysis Agent</option></select></header>
       <div class="workspace-content">
-        <div class="intro"><div class="video-badge"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="13" width="26" height="22" rx="4"/><path d="m32 20 10-6v20l-10-6"/></svg></div><h1 id="intro-title">A closer look at your video.</h1><p id="intro-subtitle">Add a video and choose what you want to find.</p></div>
+        <div class="intro"><div class="video-badge"><svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="13" width="26" height="22" rx="4"/><path d="m32 20 10-6v20l-10-6"/></svg></div><h1 id="intro-title" tabindex="-1">A closer look at your video.</h1><p id="intro-subtitle">Add a video and choose what you want to find.</p></div>
         <form id="analysis-form" class="analysis-card">
           <div id="file-row" class="file-row" hidden><div class="file-icon">▤</div><div class="file-details"><strong id="file-name"></strong><span id="file-meta"></span></div><button id="remove-file" class="remove-file" type="button">Remove <span aria-hidden="true">×</span></button></div>
           <div class="entity-heading"><strong>What should we look for?</strong><span>Select entities for initial filtering.</span></div>
           <div class="entity-options"><label><input type="checkbox" value="People" checked><span>People</span></label><label><input type="checkbox" value="Cars" checked><span>Cars</span></label><label><input type="checkbox" value="Motorcycles"><span>Motorcycles</span></label><label><input type="checkbox" value="Bicycles"><span>Bicycles</span></label><label><input type="checkbox" value="Animals"><span>Animals</span></label></div>
           <label class="sr-only" for="instructions">Instructions for your video</label><textarea id="instructions" placeholder="Add instructions for your video..."></textarea>
           <div class="card-actions"><label class="add-video"><input id="video-file" type="file" accept="video/*"><span class="add-icon">+</span><span>Add video</span></label><div class="action-buttons"><button class="primary analyze-button" type="submit">Analyze video <span aria-hidden="true">↑</span></button><button id="open-chat" class="chat-button" type="button" hidden disabled>Chat</button></div></div>
-          <div id="upload-progress-wrap" class="upload-progress-wrap" hidden><progress id="upload-progress" max="100" value="0"></progress><span id="upload-progress-label">0% uploaded</span></div>
+          <div id="upload-progress-wrap" class="upload-progress-wrap" hidden><progress id="upload-progress" max="100" value="0" aria-labelledby="upload-progress-label"></progress><span id="upload-progress-label">0% uploaded</span></div>
           <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
         </form>
         <div id="analysis-result" class="analysis-result" role="status" aria-live="polite" hidden></div>
