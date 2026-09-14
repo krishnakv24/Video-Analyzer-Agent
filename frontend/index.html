@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>VideoLens — Video analysis workspace</title>
-  <link rel="stylesheet" href="styles.css?v=4">
-  <link rel="stylesheet" href="upload.css?v=6">
-  <script src="script.js?v=11" defer></script>
+  <link rel="stylesheet" href="styles.css?v=5">
+  <link rel="stylesheet" href="upload.css?v=8">
+  <script src="script.js?v=12" defer></script>
 </head>
 <body>
   <main id="login-screen" class="login-screen">
-    <section class="login-story" aria-label="About Frame">
+    <section class="login-story" aria-label="About VideoLens">
       <div class="story-content">
         <div class="brand brand-large"><span class="brand-mark" aria-hidden="true"><span></span></span><span>VideoLens</span></div>
         <div class="story-heading"><h1>Understand<br>every moment.</h1><p>Your video analysis workspace.</p></div>
@@ -78,6 +78,13 @@
     <p id="delete-dialog-description"></p>
     <p id="delete-dialog-error" class="delete-dialog-error" role="alert" hidden></p>
     <div class="delete-dialog-actions"><button id="cancel-delete" class="secondary-button" type="button" autofocus>Cancel</button><button id="confirm-delete" class="danger-button" type="button">Delete conversation</button></div>
+  </dialog>
+  <dialog id="upload-error-dialog" class="delete-dialog" aria-labelledby="upload-error-title" aria-describedby="upload-error-file upload-error-reason upload-error-cleanup">
+    <h2 id="upload-error-title">Video upload failed</h2>
+    <p id="upload-error-file"></p>
+    <p id="upload-error-reason" class="delete-dialog-error" role="alert"></p>
+    <p id="upload-error-cleanup"></p>
+    <div class="delete-dialog-actions"><button id="dismiss-upload-error" class="secondary-button" type="button" autofocus>Close</button><button id="retry-upload" class="primary" type="button">Choose video again</button></div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>

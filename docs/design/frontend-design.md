@@ -4,7 +4,7 @@
 >
 > Scope: sign-in, conversations and deletion, video uploads, status, chat, and image attachments.
 >
-> Baseline: current repository implementation, reviewed 13 September 2026.
+> Baseline: current repository implementation, reviewed 14 September 2026.
 
 VideoLens gives each signed-in user a workspace of conversations. Each saved conversation contains one video and its follow-up messages. A user can upload another video in a new conversation while an earlier upload continues.
 
@@ -48,11 +48,11 @@ flowchart LR
 
 ## 2. Screens and controls
 
-The images below are existing repository captures. They illustrate an earlier layout and predate the deletion menu, explicit sign-out icon, revised conversation subtitle, and collapsible tablet/phone navigation. Sample account names, session IDs, and files are demonstration data. Source markup and behavior take precedence if a capture differs.
+The current screenshots come from the responsive browser checks and use mocked session data. Long filenames, account names, and unbroken message text deliberately test wrapping and overflow; they are not real customer content or analysis results. Older captures, where retained, are labeled historical. Source markup and behavior take precedence if a capture differs.
 
 ### 2.1 Sign in
 
-![Desktop sign-in reference showing username, password, remember-me, and Sign in](screenshots/login-current.png)
+![VideoLens mobile sign-in showing the compact heading, username and password fields, remember-me, and Sign in](screenshots/responsive-login-mobile.png)
 
 The sign-in form provides labeled username and password fields, a password visibility button, **Remember me**, and an inline error area. **Sign in** is disabled while its request is pending. Accounts are created by an administrator; there is no registration screen.
 
@@ -60,7 +60,7 @@ On page load, `GET /api/me` attempts to restore the login. A successful response
 
 ### 2.2 New conversation and video selection
 
-![Desktop workspace reference showing conversation navigation, video selection, entity filters, instructions, and Analyze video](screenshots/workspace-current.png)
+The upload form contains the controls below. The [historical upload-form capture](screenshots/workspace-current.png) shows the earlier Frame branding and navigation; the saved-session screenshots in the next section show the current responsive workspace.
 
 | Area | Purpose and current behavior |
 | --- | --- |
@@ -70,14 +70,18 @@ On page load, `GET /api/me` attempts to restore the login. A successful response
 | Video row | Displays the selected filename and size. **Remove** clears the current selection; it is disabled during that draft's upload. |
 | Entity filters | People, Cars, Motorcycles, Bicycles, Animals. A new conversation defaults to People and Cars; submission requires at least one selection. |
 | Instructions | Optional text captured when the upload starts. It is sent with the later session-creation request. |
-| Analyze video / Resume upload | Starts a new independent upload or resumes the explicitly selected draft. It is disabled during that draft's upload and remains disabled once the conversation has a saved video. |
+| Analyze video / Resume upload | Starts a new independent upload or resumes the explicitly selected paused draft. During transfer it reads Uploading; after saving a conversation it reads **Video uploaded** and stays disabled. |
 | Progress | Shows the fraction of bytes acknowledged by the backend. There is no speed estimate or remaining-time estimate. |
 
 The header's single-choice selector is display-only in the current frontend; it has no selection handler in `script.js`.
 
 ### 2.3 Saved conversation
 
-After session creation, `session-locked` styling hides the video picker, entity controls, instructions, and transfer progress. The page shows a result card with the session ID and a conversation panel. The workspace subtitle reads “Ask follow-up questions and add reference images to explore your video.” **Chat** scrolls to the message field and focuses it when ready.
+After session creation, `session-locked` styling hides the video picker, entity controls, instructions, transfer progress, and decorative video badge. The action reads **Video uploaded**, disabled. The page shows a result card with the session ID and a conversation panel. The workspace subtitle reads “Ask follow-up questions and add reference images to explore your video.” **Chat** scrolls to the message field and focuses it when ready.
+
+![VideoLens desktop conversation with sidebar, explicit sign-out, wrapped test text, an attached image, and chat composer](screenshots/responsive-workspace-desktop.png)
+
+This desktop capture uses deliberately long sample content. See the [current mobile capture](#81-responsive-layout) for the same workspace with compact navigation.
 
 | Session state | Visible message | Enabled interaction |
 | --- | --- | --- |
@@ -86,9 +90,14 @@ After session creation, `session-locked` styling hides the video picker, entity 
 | Failed | Backend preparation error | Conversation navigation; Chat and Send remain disabled. |
 | Sending a question | “Sending question…” or “Uploading images with your question…” | Text entry, Send, and image selection are disabled until the request settles in the active conversation. |
 
-The current backend provides metadata-based text replies. The browser can render images included in message responses, but the following capture is a **synthetic renderer example**. Its matching-frame text is sample content and is not evidence of an implemented detection feature.
+The current backend provides metadata-based text replies. The browser can render images included in message responses. The older illustration below is a **historical synthetic renderer example**; its matching-frame text is sample content and is not evidence of an implemented detection feature.
+
+<details>
+<summary>Historical response-image illustration</summary>
 
 ![Synthetic conversation renderer example with text and an image in an assistant bubble](screenshots/conversation-example.png)
+
+</details>
 
 ### 2.4 Conversation options and deletion
 
@@ -138,10 +147,15 @@ The deployment design keeps these static files in the FastAPI application contai
 | `activeJobId` | The saved conversation being displayed | Its preference is saved; the actual session is reloaded. |
 | `pendingImages` | Local previews and optional uploaded image IDs for the next question | No; also cleared when opening another conversation or a new draft. |
 | `renderedMessageIds` | Message IDs already shown in the active conversation | No; rebuilt from backend history. |
-| `jobTimer`, `messageTimer`, `lastJobStatus` | Polling and status tracking for the active conversation | No. |
+| `trackedJobs`, `jobRequests`, `jobTimer` | Baseline/current statuses for known conversations, in-flight requests, and background preparation polling | No; rebuilt from owned jobs at workspace initialization. |
+| `messageTimer`, `jobStatusLoading`, `workspaceGeneration` | Active history polling, pending detail load, and protection against stale account/workspace responses | No. |
+| `uploadFailures`, `pendingUploadCleanup`, `cleanupTimer` | Queued reason popups and best-effort discard requests | Popup prompt/filter copies are in memory; cleanup IDs restore from browser storage. |
+| `notifiedEvents` | Job/event notification attempts made in this page | No; persisted event markers supplement this set. |
 | `menuTarget`, `deleteTarget`, `deleteInProgress` | Saved conversation targeted by options/confirmation and whether deletion is pending | No; independent of the currently displayed session. |
 | `mobileLayout`, navigation `aria-expanded` / `navigation-open` | Whether the viewport is at most 900 px and its conversation panel is open | No; the compact panel starts collapsed and resets when crossing the breakpoint. |
 | `frameUploadDraft:{userId}:{draftId}` | `localStorage` JSON with draft identity, upload ID, file metadata, entities, instructions, progress, creation time | Yes, while browser storage is retained. Contains no file bytes or `File` object. |
+| `frameUploadCleanup:{userId}:{draftId}` | Known upload ID awaiting guarded server discard | Yes when storage is available; restored after login. |
+| `frameNotification:{userId}:{jobId}:{event}` | Marker for uploaded, ready, or preprocessing-failed notification | Yes when storage is available; used to suppress repeat alerts. |
 | `frameLastJob:{userId}` | `localStorage` entry containing the preferred saved conversation ID | Yes. It is a UI preference, not authorization. |
 
 These are the shapes of the two main browser records. They are plain JavaScript objects, **not implemented classes**; the class notation makes their fields and containment explicit. Active IDs are nullable; a restored draft has no `File` object, and `uploadId` / `uploadedId` remain null until their respective uploads are created.
@@ -188,10 +202,12 @@ All functions in this table are in [script.js](../../frontend/script.js).
 | File and transfer management | File input change; analysis submit; `fileDetails`, `matchesDraftFile`, `uploadVideo` | File reference, metadata check for explicit resumption, upload ID, sequential byte offsets. |
 | Parallel drafts | `createDraft`, `renderDraft`, `showDraft`, `runUpload`, `transferDraft` | Independent draft state, optional Web Lock, progress, saved session on success. |
 | Draft persistence | `draftStorageKey`, `persistDraft`, `forgetDraft`, `restoreUploadDrafts` | Per-user JSON entries, refresh restoration, migration of legacy resume keys. |
+| Upload failure | `handleUploadFailure`, `uploadFailureReason`, `renderUploadFailure` | Failed draft reset, reason dialog, retained prompt/filters for a fresh retry. |
+| Upload cleanup | `queueUploadCleanup`, `restoreUploadCleanup`, `retryUploadCleanup`, `finishUploadCleanup` | Per-user pending discard records, retry timer, cleanup feedback. |
 | Session navigation | `addConversation`, `openJob`, `clearVideo`, `startNewConversation` | Active IDs, locked form, pending previews, polling timers. |
 | Responsive navigation | `setNavigationOpen`, `closeMobileNavigation`; toggle, Escape, media-query change | Compact navigation visibility, accessible toggle state, focus after collapse. |
 | Conversation deletion | `showConversationMenu`, `closeConversationMenu`, confirmation handlers | Menu/dialog target, pending request, sidebar row, selection after deletion. |
-| Status display | `refreshJob`, `displayJob`, `notifyUser` | Readiness, control availability, result card, toast, polling. |
+| Status and notifications | `refreshJob`, `updateJob`, `ensureJobPolling`, `displayJob`, `notifyJobOnce`, `notifyUser` | Background status tracking, active controls/history, transition alerts, event deduplication. |
 | Image composition | Image input change; `renderPendingImages`, `clearPendingImages` | Pending files, local object URLs, uploaded image IDs. |
 | Message delivery | Chat submit; `loadMessages`, `addBubble` | In-flight question, history, deduplication, text/image bubbles. |
 
@@ -232,7 +248,7 @@ sequenceDiagram
 
 Progress advances after the backend acknowledges bytes. **100% uploaded is a byte-transfer milestone**: upload completion and session creation still follow. The upload notification is emitted after session creation succeeds.
 
-A failed `PATCH` triggers an offset lookup. If the server already committed bytes, the browser moves to that offset. Otherwise it retries, with at most three attempts for that chunk. If the offset lookup itself fails, the draft fails immediately. There is no retry delay, explicit request timeout, or upload cancel control.
+A failed `PATCH` triggers an offset lookup. If the server already committed bytes, the browser moves to that offset. Otherwise it retries, with at most three attempts for that chunk. If the offset lookup itself fails, recovery ends immediately. Exhausted recovery enters the [failure/reset flow](#44-upload-failure-and-a-fresh-retry). Chunk transfer has no retry delay, explicit request timeout, or upload cancel button.
 
 ### 4.2 Multiple conversations
 
@@ -265,23 +281,45 @@ Legacy `frameUpload:<userId>:<name>:<size>:<lastModified>` entries migrate into 
 
 The server's committed offset remains authoritative; persisted progress is only a display value. When draft persistence fails, a toast asks the user to keep the tab open. Browser storage retention and access are prerequisites for restoring local draft records.
 
-On successful session creation, only that draft's resume key is removed. If session creation returns `409`, `transferDraft()` lists saved jobs and searches for its upload ID. Other session-creation errors leave a failed draft for explicit retry. A retry of that draft can reuse the completed upload and recover the existing session without transferring its bytes again.
+On successful session creation, only that draft's resume key is removed. After *any* failed `POST /api/jobs` response, `transferDraft()` lists owned jobs and searches for its upload ID before entering failure handling. A matching saved conversation is recovered without retransmitting the video. If this lookup also fails or finds no match, the failure flow resets the draft; server-side discard still refuses to remove an upload referenced by a saved conversation.
+
+### 4.4 Upload failure and a fresh retry
+
+When recovery cannot complete the upload, **Video upload failed** opens with the filename, a specific reason, and cleanup status. Sign-in expiry, request-size limits, connection loss, and server errors receive readable messages. Failed drafts and their local resume records are removed, their `File` reference is cleared, and the visible file/progress controls reset only when that draft was active. Other uploads and the current unrelated conversation remain intact. Multiple failures are queued as separate popups.
+
+```mermaid
+flowchart LR
+    Error["Upload or session creation error"] --> Recover["Try offset or saved-job recovery"]
+    Recover -->|"Recovered"| Continue["Continue transfer or open saved session"]
+    Recover -->|"Not recovered"| Reset["Reason popup and failed draft reset"]
+    Reset --> Cleanup["Queue guarded upload DELETE"]
+    Reset --> Choose["Choose video again"]
+    Choose --> Fresh["Restore prompt and entities<br/>New draft and upload ID"]
+```
+
+**Close** dismisses the popup. **Choose video again** opens a new conversation, restores that failure's prompt and entity choices, and opens the video picker. The next submission starts from a fresh draft/upload ID. An interrupted page or refresh that never handled an upload failure still restores a paused Resume upload draft; that separate path continues its existing transfer.
+
+When the failed draft has a known upload ID, the browser persists `{ key, userId, uploadId }` under `frameUploadCleanup:<userId>:<draftId>` and sends `DELETE /api/uploads/{uploadId}`. It retries on the `online` event and every **15 seconds** while signed in with the page open; each cleanup attempt has a **10-second** timeout. Login restores saved cleanup records. If storage is unavailable, retries survive only while this page remains open.
+
+Cleanup **200** or **404** finishes the queue entry. **409** means the video has a saved conversation, which is preserved; feedback directs the user to refresh the workspace. A successful response with `cleanup_pending: true` finishes the request but reports files needing administrator cleanup. Other errors leave cleanup pending without restoring the failed upload selection. This is best-effort browser-driven deletion, not a guarantee that server files disappear immediately or a background service after the tab closes.
 
 ## 5. Status and notifications
 
-`openJob()` selects one saved conversation, loads its message history, checks its status immediately, and starts a status interval of **3 seconds**. `displayJob()` updates only the matching `activeJobId`.
+`showWorkspace()` seeds `trackedJobs` from the user's saved jobs as a baseline. `openJob()` selects a conversation, loads its history, and checks its details immediately. `ensureJobPolling()` checks all known queued/preprocessing jobs every **3 seconds**, including background conversations, plus an active detail load still awaiting status. `jobRequests` prevents overlapping status requests for the same job. `displayJob()` changes only the selected view.
 
 | Event | Browser behavior |
 | --- | --- |
-| Selected session is preparing | Poll its status; disable Chat, message entry, and Send. |
-| Selected session is ready | Enable chat; stop status polling; start history polling every 3 seconds. |
-| Selected session failed | Show the backend error; stop status polling; leave sending disabled. |
-| Open another conversation | Clear the previous timers, message IDs, displayed history, and pending image previews; load the newly selected session. |
-| Start a new conversation | Clear status and history timers for the old view; ongoing upload drafts continue. |
+| Any tracked session is preparing | Poll its status and update its sidebar label; sending is disabled when it is the selected session. |
+| Preparing becomes ready | Update its label to Ready to chat and issue its ready event once; enable chat/history polling only when selected. |
+| Preparing becomes failed | Update its label and issue a preparation-error event; leave sending disabled when selected. |
+| Open/reopen/reload an already-ready session | Load its history and enable chat quietly; baseline ready data is not a new completion event. |
+| Open another or a new conversation | Reset the previous view's history/timer and pending images; upload drafts and background job polling continue. |
 
-`notifyUser()` shows a toast for **6.5 seconds**. It also attempts a browser notification when requested and permission has already been granted. Permission is requested during Analyze video submission if the browser has not yet recorded a choice.
+There are two normal completion events: **uploaded** after the conversation is saved and **ready** after an observed queued/preprocessing-to-ready transition. `notifyJobOnce()` uses per-user/job/event local-storage markers and a Web Lock where available. This suppresses repeat attempts on polling, navigation, reload, and cooperating tabs. Without storage, deduplication is page-local; without Web Locks, simultaneous tabs have no atomic claim. This is not server-side exactly-once notification delivery.
 
-**Notifications require an open page.** There is no service worker, push subscription, or notification after the tab closes. Every completed upload can show its upload toast, but preparation status is monitored only for the selected saved conversation. A background conversation's ready notification is therefore not guaranteed until it is opened. Opening an already-ready conversation also triggers the current ready toast.
+`notifyUser()` shows a toast for **6.5 seconds** and optionally a browser notification when permission is granted, using a stable event tag. Permission is requested during Analyze video submission when appropriate. Unsupported or throwing browser-notification APIs are caught and cannot turn a saved upload into a failure or trigger discard. Delayed preparing responses cannot regress a known terminal status; responses from a previous workspace generation are ignored.
+
+**Notifications require an open page.** There is no service worker or offline push. Background preparation is observed while the page runs; a job first loaded as ready after the tab was closed establishes a quiet baseline rather than replaying a completion notification.
 
 ## 6. Chat and image attachments
 
@@ -322,11 +360,12 @@ Successful image uploads are reused if a later step fails and the user retries t
 | --- | --- | --- |
 | Refresh after session creation | Saved video, messages, and image associations remain on the backend. | Restore login, reload jobs, open the remembered session or newest session. |
 | Refresh during transfer | Committed server bytes and locally persisted draft details remain; `File` references are lost. | Select the restored Resume upload row, reselect its original file, and resume; its saved filters/instructions are restored. |
-| Transfer error | Failed sidebar draft and inline error; backend retains committed offset. | Select the failed draft and retry. Removing it clears its sidebar entry and local resume record, not server bytes. |
-| Lost session-creation response | Video can be complete even though the draft shows failure. | Explicitly retry that draft; reuse its upload and recover a duplicate session on `409`. |
+| Transfer recovery exhausted | Reason popup; failed draft/file selection removed; guarded server cleanup queued. | Choose video again restores its prompt/entities and starts a new draft/upload ID. |
+| Lost session-creation response | The backend may already hold a saved conversation. | Query owned jobs by upload ID first; guarded discard returns 409 if a saved session exists. |
+| Cleanup request cannot complete | Known upload ID remains in the per-user cleanup queue. | Retry on network recovery/every 15 seconds while the page is open; restore after login. |
 | Preparation failure | Saved session shows Failed; chat is unavailable. | No preparation-retry control exists in this UI. |
 | Chat/image request failure | Error next to the composer; pending image IDs and text can be reused while the conversation remains active. | Retry or replace the failing attachment. A lost successful message response can require history inspection before resending. |
-| Established login expires | Current request fails; there is no automatic redirect. | Reload to return to sign-in, then restore saved sessions. Select an interrupted draft before reselecting its original video. |
+| Established login expires | Current request fails; upload failure explains expiry and resets that draft; no automatic redirect. | Sign in again. Pending cleanup resumes; interrupted-page drafts can resume, while a reported failure starts a fresh upload. |
 | Same draft resumed in two tabs | Where Web Locks is available, the second transfer is rejected with a conflict message. | Return to the tab already transferring it, or use New conversation for an independent upload. |
 | Sign out with uploading drafts | Toast asks the user to wait; sign-out does not run. | Wait for uploads to settle. Successful sign-out revokes login; it does not delete saved workspace data. |
 | Deletion rejected or request fails | Confirmation remains open with an inline error; its buttons become usable again. | Wait for preparation on 409, or address the reported failure before retrying. |
@@ -340,7 +379,7 @@ The sidebar is loaded at workspace initialization and updated for uploads comple
 
 | Viewport | Current CSS behavior |
 | --- | --- |
-| Wider than 900 px | Two columns: sidebar width is `clamp(240px, 22vw, 290px)` and the content column can shrink. Content is capped at 1,084 px. |
+| Wider than 900 px | Two columns: sidebar width is `clamp(240px, 22vw, 290px)` and the content column can shrink. Conversation content is capped at 880 px. |
 | 621–900 px | One content column below a compact header. A toggle expands the conversation/account panel, capped at `60dvh`; the conversation list scrolls vertically. Login uses a stacked layout. |
 | 620 px and narrower | Same collapsible navigation; smaller spacing, wrapping chat controls, and a compact login without the large illustration. |
 | 480 px and narrower | New conversation becomes a labeled 44 px icon control; upload actions use the full available row and the file details/removal control can wrap. |
@@ -350,14 +389,29 @@ The desktop sidebar is sticky and constrained to the viewport height. Its conver
 
 **Vertical page scrolling is intentional.** Long forms, status messages, and chat content remain reachable instead of forcing the whole workspace into one fixed-height screen. Chat history has its own bounded scroll area: up to `min(38dvh, 350px)` normally and `42dvh` on phones. Pending image previews are 75 × 75 px crops, while message attachments preserve their image content within a maximum 180 px box.
 
-The layout uses dynamic viewport units (`dvh`), flexible minimum widths, wrapping action rows, and breaking long status text. Text inputs retain readable sizes (17 px at login and 16 px in chat). The viewport enables `viewport-fit=cover` and requests content resizing for the onscreen keyboard where supported; safe-area insets add space around navigation, login/footer content, and phone toasts. These CSS choices support fitting the available screen while keeping vertical scrolling and normal browser zoom available.
+The layout uses dynamic viewport units (`dvh`), flexible minimum widths, wrapping action rows, and breaking long status text. Editable login, instruction, and chat inputs use 16 px text at the default browser font size. The viewport enables `viewport-fit=cover` and requests content resizing for the onscreen keyboard where supported; safe-area insets add space around navigation, login/footer content, and phone toasts. These CSS choices support fitting the available screen while keeping vertical scrolling and normal browser zoom available.
 
-The following mobile capture uses sample session data and predates the collapsible-navigation change. Its horizontal navigation and toast placement are historical reference only; the current behavior is described above.
+**Typography and spacing:** VideoLens uses a compact type scale for reading conversations and scanning controls. These are local design decisions, with no measured equivalence to Gemini or ChatGPT. The system font stack (`system-ui`, Apple system fonts, Segoe UI, then sans-serif) uses installed fonts and makes no external font requests. Shared `:root` tokens in `styles.css` keep text sizing consistent across the page and `upload.css`.
+
+| Element | Current sizing |
+| --- | --- |
+| Captions / secondary text | `.75rem` / `.8125rem` (12 / 13 px at the default 16 px root) |
+| Interface labels, navigation, buttons | `.875rem` (14 px); default line-height 1.45 |
+| Conversation text | `.9375rem` (15 px); line-height 1.55 |
+| Editable inputs and section headings | `1rem` (16 px) |
+| Workspace title | Fluid `clamp(1.375rem, 1rem + 1vw, 1.625rem)` (22–26 px) |
+| Login form title | Fluid 1.75–2rem (28–32 px) |
+| Workspace brand | 1.375rem (22 px) |
+| Workspace action controls | 44 px standard/minimum height; Sign in is 46 px and login fields are 48 px |
+
+Rem-based text respects the browser's root font preference. The content column stops at 880 px to keep conversation lines manageable. Compact spacing includes 18 px upload-card padding, a 24 px top gap before that card, 12 × 16 px chat header/composer padding, and 11 × 14 px chat-bubble padding. Phone overrides keep wrapping and touch controls usable while reducing surrounding space; this is not a fixed-scale screenshot layout.
+
+The mobile capture below shows the compact navigation and a sample conversation with deliberately unbroken text and an image. It is a full-page screenshot, so its height includes content reached by normal vertical scrolling.
 
 <details>
-<summary>View the existing mobile workspace capture</summary>
+<summary>View the current mobile workspace capture</summary>
 
-![Mobile workspace reference showing horizontal conversation navigation and a ready session](screenshots/mobile-workspace-current.png)
+![VideoLens mobile workspace with compact navigation, wrapped sample text, reference image, and chat composer](screenshots/responsive-workspace-mobile.png)
 
 </details>
 
@@ -377,7 +431,7 @@ Frontend assets and relative API paths use the same origin, so this test require
 
 ### 9.1 Acceptance scenarios
 
-These scenarios define browser acceptance checks. The targeted deletion checks recorded below do not establish that every scenario has been verified.
+These scenarios define browser acceptance checks. The automated and targeted checks recorded below do not establish that every scenario has been verified on physical devices.
 
 | ID | Scenario | Expected outcome |
 | --- | --- | --- |
@@ -397,10 +451,17 @@ These scenarios define browser acceptance checks. The targeted deletion checks r
 | FE-14 | Restore a legacy per-user filename-based resume key. | An explicit paused draft appears; merely selecting the same file in New conversation does not reuse it. |
 | FE-15 | Resize between desktop, tablet, and phone widths; expand navigation, select a session/draft, and press Escape. | Navigation is visible on desktop and toggle-controlled below 901 px; selection/Escape collapse it without leaving focus hidden. |
 | FE-16 | Open login, upload, and chat on a phone using the computer's Wi-Fi address. | Page and relative API requests reach the same backend; controls remain reachable through vertical scrolling and the onscreen keyboard. |
+| FE-17 | Exhaust video chunk recovery while another video uploads. | Reason popup appears; only the failed draft resets; Choose video again restores its prompt/entities with a new ID. |
+| FE-18 | Interrupt failed-upload DELETE, then restore connectivity/sign-in. | Its cleanup record retries; 404 finishes it, 409 preserves a saved session, and a purge warning requests administrator cleanup. |
+| FE-19 | Open/reload a ready session, then finish a new upload and a background preparation. | Existing ready data stays quiet; each new upload-saved/ready event is attempted once and the completed control reads Video uploaded. |
 
 [test_auth.py](../../tests/test_auth.py) covers API-side ownership, independent upload progress, distinct saved sessions, persisted message/image relationships, and conversation deletion guards and recovery. It does not exercise browser state, layout, or notification timing. [test_cleanup.py](../../tests/test_cleanup.py) covers cleanup behavior, not UI behavior.
 
+[test_upload_discard.py](../../tests/test_upload_discard.py) checks the guarded DELETE contract with isolated temporary data, including linked-session protection, locking, and file/SQL rollback. [frontend_notifications.cjs](../../tests/frontend_notifications.cjs) uses mocked API responses to check quiet ready baselines, one notification attempt per completion event, background preparation, optional Notification failures, and stale-response handling. Run the latter with `node tests/frontend_notifications.cjs` using the same Playwright/Edge prerequisites as the browser suites below.
+
 [frontend_uploads.cjs](../../tests/frontend_uploads.cjs) passed in Microsoft Edge with mocked API responses. It checks independent parallel uploads with matching file metadata, exact bytes and per-conversation prompts/entities, resumption after refresh, mismatch rejection, legacy draft migration, cross-tab Web Locks, and isolated resume-key removal. Run it with `node tests/frontend_uploads.cjs` against the application's static assets; the script requires Playwright and Edge and documents optional paths in its header. The API is mocked and payloads are small, so these results establish neither physical-phone layout acceptance nor 24-hour-video or network/server throughput.
+
+[frontend_layout.cjs](../../tests/frontend_layout.cjs) checks the actual frontend in Edge using mocked API data. Confirmed checks passed at 320, 360, 390, 700, 768, 900, and 1,280 px widths, including an 844 × 390 landscape viewport. They cover login, upload form, navigation, saved conversation, deletion dialog, long filenames/account names, unbroken messages, and images. Resizing preserves the active job, unsent question, pending images, and upload progress without reloading. Run `node tests/frontend_layout.cjs` with the same Playwright/Edge prerequisites; it also writes the three current screenshots referenced above. Viewport emulation does not verify physical iOS/Android keyboards, mobile-browser chrome, or an actual phone connection over Wi-Fi.
 
 For the deletion change, browser checks with mocked API responses passed for right-click, ellipsis, Shift+F10, cancellation, inactive/active/last-conversation deletion, a 409 error, mobile menu bounds, refresh, and the CSRF request header, with no JavaScript errors. Those checks did not delete real workspace data; backend deletion was checked separately with isolated test data.
 
@@ -411,12 +472,11 @@ The following items remain future frontend work and are not represented as compl
 | Priority | Improvement | Reason |
 | --- | --- | --- |
 | High | Central handling for expired login during long uploads. | A user should receive a clear reauthentication path and retain resumable transfer information. |
-| High | Reconcile preparation state for all saved conversations. | Background sessions currently have no continuous readiness tracking in the UI. |
 | High | Keep unsent text and image selection explicitly scoped to each conversation. | Pending images are cleared on navigation, while text is not consistently reset or maintained as a per-session draft. |
 | High | Define and validate navigation during in-flight Send. | Old requests can finish after navigation; control state must remain correct on the new view. |
 | Medium | Distinguish byte transfer, finalization, and session creation in the progress display. | The current bar can read 100% while the draft still says Uploading. |
 | Medium | Add visible upload speed, remaining-time estimate, and deliberate pause/cancel behavior. | Long transfers need more useful feedback and control. |
-| Medium | Refresh captures and complete keyboard/mobile validation. | Existing screenshots show sample data and do not demonstrate all error and parallel-upload states. |
-| Medium | Review sidebar timestamps and control labels. | Saved entries currently use static “just now” copy; several labels reflect early prototype behavior. |
+| Medium | Complete physical-phone and assistive-technology validation. | Current viewport checks and sample screenshots do not establish real iOS/Android keyboard or screen-reader behavior. |
+| Medium | Add useful creation timestamps alongside status labels. | Saved entries show Preparing video, Ready to chat, or Preparation failed; creation times are not yet presented. |
 
 For server request schemas, persistence, and enforcement, continue with the [backend LLD](backend-design.md). For component boundaries and deployment context, return to the [HLD](../architecture.md).

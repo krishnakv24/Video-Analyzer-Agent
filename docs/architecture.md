@@ -26,6 +26,7 @@ flowchart LR
 - **One conversation = one video.** Follow-up questions and images stay with that conversation.
 - **More than one upload can run.** Each upload started from New conversation has an independent draft and server upload ID, even when filenames, sizes, and modification times match. Earlier transfers continue.
 - **Saved work survives refresh and login.** The backend keeps completed sessions and their messages. Browser storage restores interrupted drafts as Resume upload rows; select the intended draft and reselect its original video to continue.
+- **An upload failure has a clear recovery path.** After transfer recovery fails, a popup explains the reason, clears that draft, and offers Choose video again with its prompt and filters restored. Cleanup targets only uploads that have no saved conversation.
 - **Current preparation is metadata only.** It computes a checksum and optional video duration. Current chat answers metadata questions; recognition is not connected.
 
 ## 2. The architecture
@@ -72,7 +73,8 @@ The frontend and backend remain separate source folders. The application image p
 | Sign in | Collect credentials, restore the workspace | Check credentials, issue session cookie, enforce ownership |
 | Video transfer | Slice the file into 8 MiB requests; show each draft's progress | Check offsets and limits; stream bytes to host storage |
 | Conversation | Select the visible session; keep background drafts running | Create a unique session linked to one completed upload |
-| Preparation | Poll the selected session; show its status | Compute SHA-256 and optional duration; persist ready/failed |
+| Preparation | Poll preparing sessions, including background conversations; notify on observed completion | Compute SHA-256 and optional duration; persist ready/failed |
+| Failed upload | Show the reason, reset its selection, and retry queued cleanup | Discard an owner-checked upload only when no conversation references it |
 | Follow-up images | Preview images beside the question; send on Submit | Validate image bytes; attach image records to that message |
 | Conversation history | Render text and protected image URLs | Persist and return only the signed-in user's session data |
 | Delete a conversation | Open its options menu, confirm deletion, update the selected view | Check ownership and preparation state; remove that conversation's rows and referenced media |
@@ -138,13 +140,16 @@ Configure the chosen ingress to accept **at least 20 MiB image bodies** and 8 Mi
 | Event | What survives | What the user or operator does |
 | --- | --- | --- |
 | Browser refresh | Saved database records, received video bytes, and locally saved draft details | Reopen a session, or select its Resume upload draft and reselect the original video |
-| Application container restart | Data on the mounted host directory | Retry a failed draft; automatic chunk recovery needs a successful status query. Startup reschedules unfinished metadata preparation |
+| Application container restart | Data on the mounted host directory | Chunk recovery needs a successful status query. An interrupted-page draft can resume; a reported upload failure instead offers a fresh upload and queues cleanup. Startup reschedules unfinished metadata preparation |
 | Container image / pod replacement | Same host data if the PVC is retained | Reattach the existing claim and keep the single-writer rule |
 | Storage host unavailable | Files remain tied to that host | Restore the host or recover from backup; automatic cross-node failover is not provided |
 | Manual cleanup | Accounts stay unless explicitly included | Stop the application, preview cleanup, then execute only the intended reset |
 | Delete one conversation | Accounts and other conversations remain | Confirm in the sidebar menu; a file-cleanup warning requires administrator attention |
+| Failed-upload cleanup cannot reach the server | Its known upload ID remains queued in browser storage when available | Retry on network recovery and every 15 seconds while signed in with the page open; reload/sign-in restores the cleanup queue |
 
 The file system and SQLite are separate persistence operations. Recovery works for saved upload offsets, but the code does not provide an atomic transaction covering both files and database rows. Specific failure cases are recorded in the [backend recovery notes](design/backend-design.md#7-failure-handling-and-operational-limits).
+
+Upload-saved and preparing-to-ready alerts are separate events. The frontend suppresses repeats using per-user/job/event browser records and Web Locks where available; opening or reloading an already-ready conversation stays quiet. Notifications depend on an open page and are not server push. Optional browser-alert errors do not invalidate saved uploads.
 
 ## 7. Design decisions and verification
 

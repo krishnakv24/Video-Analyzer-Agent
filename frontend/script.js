@@ -12,7 +12,15 @@ let activeJobId = null;
 let jobTimer = null;
 let messageTimer = null;
 let renderedMessageIds = new Set();
-let lastJobStatus = null;
+const trackedJobs = new Map();
+const jobRequests = new Map();
+const notifiedEvents = new Set();
+let jobStatusLoading = false;
+let workspaceGeneration = 0;
+const uploadFailures = [];
+let uploadFailureClosing = false;
+const pendingUploadCleanup = new Map();
+let cleanupTimer = null;
 let toastTimer = null;
 let currentUser = null;
 let csrfToken = null;
@@ -46,6 +54,7 @@ let deleteInProgress = false;
 const navigationToggle = document.querySelector('#toggle-navigation');
 const workspaceNavigation = document.querySelector('#workspace-navigation');
 const mobileLayout = window.matchMedia('(max-width: 900px)');
+const uploadErrorDialog = document.querySelector('#upload-error-dialog');
 
 function setNavigationOpen(open) {
   document.querySelector('.sidebar').classList.toggle('navigation-open', open);
@@ -154,7 +163,8 @@ function restoreUploadDrafts(jobs) {
         saved = { id: `draft-${uploadId}`, userId: currentUser.id, uploadId,
           fileInfo: { name, size, lastModified }, entities: ['People', 'Cars'], instructions: '', progress: 0, createdAt: Date.now() };
       }
-      if (jobs.some(job => job.upload_id === saved.uploadId)) {
+      if (jobs.some(job => job.upload_id === saved.uploadId)
+        || pendingUploadCleanup.has(`frameUploadCleanup:${currentUser.id}:${saved.id}`)) {
         localStorage.removeItem(key);
         continue;
       }
@@ -283,17 +293,24 @@ async function runUpload(draft) {
   try {
     if (navigator.locks) {
       await navigator.locks.request(`frame-upload:${draft.userId}:${draft.id}`, { ifAvailable: true }, async lock => {
-        if (!lock) throw new Error('This conversation is uploading in another tab. Return to that tab, or start a New conversation for another video.');
+        if (!lock) {
+          draft.status = 'paused';
+          draft.error = 'This conversation is uploading in another tab. Return to that tab, or start a New conversation for another video.';
+          renderDraft(draft);
+          if (activeDraftId === draft.id) showDraft(draft.id);
+          return;
+        }
         await transferDraft(draft);
       });
     } else {
       await transferDraft(draft);
     }
   } catch (error) {
-    draft.status = 'failed';
-    draft.error = error.message;
-    renderDraft(draft);
-    if (activeDraftId === draft.id) showDraft(draft.id);
+    if (draft.status === 'complete') {
+      notifyUser('Your video was saved. Refresh the workspace to open its conversation.');
+      return;
+    }
+    handleUploadFailure(draft, error);
   }
 }
 
@@ -318,23 +335,151 @@ async function transferDraft(draft) {
       body: JSON.stringify({ upload_id: upload.id, entities, instructions })
     });
   } catch (error) {
-    if (error.status !== 409) throw error;
-    job = (await api('/api/jobs')).jobs.find(item => item.upload_id === upload.id);
+    // The session may have been saved even if its response was lost.
+    try { job = (await api('/api/jobs')).jobs.find(item => item.upload_id === upload.id); }
+    catch { /* Discard refuses to remove any upload already linked to a session. */ }
     if (!job) throw error;
   }
+  draft.status = 'complete';
   forgetDraft(draft);
   const selected = activeDraftId === draft.id;
   uploadDrafts.delete(draft.id);
   draft.button.remove();
   addConversation(file.name.replace(/\.[^.]+$/, ''), job.id, selected);
+  trackedJobs.set(job.id, { id: job.id, filename: file.name, status: 'preprocessing' });
+  notifyJobOnce(job.id, 'uploaded', `${file.name} uploaded. Background preprocessing has started.`);
+  updateJob({ ...job, filename: file.name });
   if (selected) openJob(job.id);
-  notifyUser(`${file.name} uploaded. Background preprocessing has started.`, true);
 }
+
+function uploadFailureReason(error) {
+  if (error.status === 401) return 'Your sign-in expired. Sign in again, then choose the video to retry.';
+  if (error.status === 413) return 'The file or upload chunk exceeds the server limit.';
+  if (error instanceof TypeError || error.name === 'AbortError') return 'The connection to the server was interrupted. Check your network and that the server is running.';
+  if (error.status >= 500 && /^Request failed/.test(error.message)) return `The server could not save this upload (HTTP ${error.status}). Check available disk space and the server logs before retrying.`;
+  return error.message || 'The upload could not be completed. Please choose the video again.';
+}
+
+function renderUploadFailure() {
+  const failure = uploadFailures[0];
+  if (!failure || uploadFailureClosing) return;
+  document.querySelector('#upload-error-file').textContent = failure.filename;
+  document.querySelector('#upload-error-reason').textContent = failure.reason;
+  document.querySelector('#upload-error-cleanup').textContent = failure.cleanup;
+  if (!uploadErrorDialog.open) uploadErrorDialog.showModal();
+}
+
+function handleUploadFailure(draft, error) {
+  draft.status = 'failed';
+  const failure = { filename: draft.fileInfo.name, entities: [...draft.entities], instructions: draft.instructions,
+    reason: uploadFailureReason(error), cleanup: draft.uploadId
+      ? 'Clearing the incomplete upload from the server…'
+      : 'The selected video has been cleared. Choose it again to retry.' };
+  uploadFailures.push(failure);
+  if (draft.uploadId) queueUploadCleanup(draft, failure);
+  forgetDraft(draft);
+  uploadDrafts.delete(draft.id);
+  draft.button.remove();
+  if (activeDraftId === draft.id) clearVideo();
+  draft.file = null;
+  renderUploadFailure();
+}
+
+function queueUploadCleanup(draft, failure) {
+  const key = `frameUploadCleanup:${draft.userId}:${draft.id}`;
+  const record = { key, userId: draft.userId, uploadId: draft.uploadId };
+  try { localStorage.setItem(key, JSON.stringify(record)); } catch { /* Retry while this tab is open. */ }
+  pendingUploadCleanup.set(key, { ...record, failure, inFlight: false });
+  retryUploadCleanup();
+}
+
+function restoreUploadCleanup() {
+  pendingUploadCleanup.clear();
+  clearInterval(cleanupTimer);
+  cleanupTimer = null;
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.startsWith(`frameUploadCleanup:${currentUser.id}:`)) continue;
+      try {
+        const record = JSON.parse(localStorage.getItem(key));
+        if (record?.key === key && record.userId === currentUser.id && typeof record.uploadId === 'string') {
+          pendingUploadCleanup.set(key, { ...record, inFlight: false });
+        }
+      } catch { /* Ignore invalid saved cleanup entries. */ }
+    }
+  } catch { /* Browser storage may be unavailable. */ }
+  retryUploadCleanup();
+}
+
+function retryUploadCleanup() {
+  if (!currentUser) return;
+  if (pendingUploadCleanup.size && !cleanupTimer) cleanupTimer = setInterval(retryUploadCleanup, 15000);
+  for (const record of pendingUploadCleanup.values()) {
+    if (record.userId !== currentUser.id || record.inFlight) continue;
+    record.inFlight = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    api(`/api/uploads/${record.uploadId}`, { method: 'DELETE', signal: controller.signal }).then(response => {
+      finishUploadCleanup(record, response.cleanup_pending
+        ? 'The failed upload was removed, but some server files need administrator cleanup.'
+        : 'The incomplete upload was removed. Choose the video again to retry.');
+    }).catch(error => {
+      if (error.status === 404) finishUploadCleanup(record, 'The failed upload is no longer on the server. Choose the video again to retry.');
+      else if (error.status === 409) finishUploadCleanup(record, 'The video already has a saved conversation. Refresh the workspace to open it.');
+      else if (record.failure) {
+        record.failure.cleanup = 'The selection was cleared. Server cleanup is pending and will retry when the connection and sign-in are available.';
+        if (uploadFailures[0] === record.failure) renderUploadFailure();
+      }
+    }).finally(() => {
+      clearTimeout(timeout);
+      record.inFlight = false;
+    });
+  }
+}
+
+function finishUploadCleanup(record, message) {
+  pendingUploadCleanup.delete(record.key);
+  try { localStorage.removeItem(record.key); } catch { /* A later 404 is safe to repeat. */ }
+  if (record.failure) {
+    record.failure.cleanup = message;
+    if (uploadFailures[0] === record.failure) renderUploadFailure();
+  }
+  if (!pendingUploadCleanup.size) { clearInterval(cleanupTimer); cleanupTimer = null; }
+}
+
+function closeUploadFailure() {
+  uploadFailures.shift();
+  uploadFailureClosing = true;
+  uploadErrorDialog.close();
+}
+
+document.querySelector('#dismiss-upload-error').addEventListener('click', closeUploadFailure);
+uploadErrorDialog.addEventListener('cancel', event => {
+  event.preventDefault();
+  closeUploadFailure();
+});
+document.querySelector('#retry-upload').addEventListener('click', () => {
+  const failure = uploadFailures[0];
+  closeUploadFailure();
+  if (!failure) return;
+  startNewConversation();
+  document.querySelector('#instructions').value = failure.instructions;
+  document.querySelectorAll('.entity-options input').forEach(input => { input.checked = failure.entities.includes(input.value); });
+  fileInput.click();
+});
+uploadErrorDialog.addEventListener('close', () => {
+  uploadFailureClosing = false;
+  if (uploadFailures.length) renderUploadFailure();
+});
+window.addEventListener('online', retryUploadCleanup);
 
 async function showWorkspace(user) {
   const response = await api('/api/jobs');
   currentUser = user;
   csrfToken = user.csrf_token;
+  workspaceGeneration++;
+  trackedJobs.clear();
+  jobRequests.clear();
   clearVideo();
   uploadDrafts.clear();
   activeDraftId = null;
@@ -342,22 +487,91 @@ async function showWorkspace(user) {
   document.querySelector('#avatar').textContent = user.username.charAt(0).toUpperCase();
   const list = document.querySelector('#conversation-list');
   list.replaceChildren();
-  [...response.jobs].reverse().forEach(job => addConversation(job.filename.replace(/\.[^.]+$/, ''), job.id));
+  [...response.jobs].reverse().forEach(job => {
+    trackedJobs.set(job.id, job);
+    addConversation(job.filename.replace(/\.[^.]+$/, ''), job.id);
+    renderJobStatus(job);
+  });
+  restoreUploadCleanup();
   restoreUploadDrafts(response.jobs);
-  const remembered = localStorage.getItem(`frameLastJob:${user.id}`);
+  let remembered;
+  try { remembered = localStorage.getItem(`frameLastJob:${user.id}`); } catch { /* Optional preference. */ }
   const selected = response.jobs.find(job => job.id === remembered) || response.jobs[0];
   loginScreen.hidden = true;
   workspaceScreen.hidden = false;
   if (selected) openJob(selected.id);
+  ensureJobPolling();
 }
 
-function notifyUser(message, browserNotification = false) {
+function notifyUser(message, browserNotification = false, tag) {
   toast.textContent = message;
   toast.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.hidden = true; }, 6500);
-  if (browserNotification && 'Notification' in window && Notification.permission === 'granted') {
-    new Notification('VideoLens', { body: message });
+  try {
+    if (browserNotification && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification('VideoLens', { body: message, tag, renotify: false });
+    }
+  } catch { /* Browser alerts are optional; saved uploads and UI state remain valid. */ }
+}
+
+function notifyJobOnce(jobId, event, message) {
+  if (!currentUser) return;
+  const generation = workspaceGeneration;
+  const key = `frameNotification:${currentUser.id}:${jobId}:${event}`;
+  if (notifiedEvents.has(key)) return;
+  notifiedEvents.add(key);
+  const deliver = () => {
+    if (generation !== workspaceGeneration) return;
+    try {
+      if (localStorage.getItem(key)) return;
+      localStorage.setItem(key, '1');
+    } catch { /* In-memory deduplication still works when storage is unavailable. */ }
+    notifyUser(message, true, key);
+  };
+  if (navigator.locks) navigator.locks.request(key, deliver).catch(() => {});
+  else deliver();
+}
+
+function isPreparing(status) {
+  return status === 'queued' || status === 'preprocessing';
+}
+
+function renderJobStatus(job) {
+  const button = [...document.querySelectorAll('.conversation[data-job-id]')].find(item => item.dataset.jobId === job.id);
+  if (button) button.querySelector('small').textContent = job.status === 'ready' ? 'Ready to chat'
+    : job.status === 'failed' ? 'Preparation failed' : 'Preparing video';
+}
+
+function updateJob(job) {
+  const previous = trackedJobs.get(job.id);
+  if (!previous) return;
+  // A delayed preparing response must never undo a terminal status.
+  if (['ready', 'failed'].includes(previous.status) && job.status !== previous.status) return;
+  const current = { ...previous, ...job };
+  trackedJobs.set(job.id, current);
+  if (job.id === activeJobId) jobStatusLoading = false;
+  renderJobStatus(current);
+  ensureJobPolling();
+  if (job.id === activeJobId) displayJob(current);
+  if (isPreparing(previous.status) && current.status === 'ready') {
+    notifyJobOnce(job.id, 'ready', `${current.filename || 'Your video'} is ready. Continue the conversation.`);
+  } else if (isPreparing(previous.status) && current.status === 'failed') {
+    notifyJobOnce(job.id, 'preprocessing-failed', `Could not prepare ${current.filename || 'your video'}: ${current.error || 'Unknown error'}`);
+  }
+}
+
+function ensureJobPolling() {
+  const needed = (activeJobId && jobStatusLoading) || [...trackedJobs.values()].some(job => isPreparing(job.status));
+  if (needed && !jobTimer) {
+    jobTimer = setInterval(() => {
+      const ids = new Set([...trackedJobs.values()].filter(job => isPreparing(job.status)).map(job => job.id));
+      if (activeJobId && jobStatusLoading) ids.add(activeJobId);
+      ids.forEach(id => refreshJob(id));
+    }, POLL_INTERVAL_MS);
+  } else if (!needed) {
+    clearInterval(jobTimer);
+    jobTimer = null;
   }
 }
 
@@ -420,24 +634,30 @@ function displayJob(job) {
   const session = document.createElement('p');
   session.textContent = `Session ID: ${job.session_id}`;
   result.append(heading, message, session);
-  if (isReady && lastJobStatus !== 'ready') {
-    notifyUser('Video preprocessing is complete. You can continue the conversation.', true);
+  if (isReady && !messageTimer) {
     loadMessages(job.id).catch(() => {});
-    clearInterval(messageTimer);
     messageTimer = setInterval(() => loadMessages(job.id).catch(() => {}), POLL_INTERVAL_MS);
   }
-  if (isFailed && lastJobStatus !== 'failed') notifyUser('Video preprocessing failed. Please try again.');
-  lastJobStatus = job.status;
-  if (isReady || isFailed) { clearInterval(jobTimer); jobTimer = null; }
 }
 
-async function refreshJob() {
-  const jobId = activeJobId;
-  if (!jobId) return;
-  try { displayJob(await api(`/api/jobs/${jobId}`)); }
-  catch (error) {
+function refreshJob(jobId = activeJobId) {
+  if (!jobId || jobRequests.has(jobId)) return;
+  const generation = workspaceGeneration;
+  const request = api(`/api/jobs/${jobId}`).then(job => {
+    if (generation === workspaceGeneration) updateJob(job);
+  }).catch(error => {
+    if (generation !== workspaceGeneration) return;
     if (activeJobId === jobId) document.querySelector('#chat-subtitle').textContent = `Could not check status: ${error.message}`;
-  }
+    if (error.status === 404) {
+      trackedJobs.delete(jobId);
+      if (activeJobId === jobId) jobStatusLoading = false;
+      ensureJobPolling();
+    }
+  }).finally(() => {
+    if (jobRequests.get(jobId) === request) jobRequests.delete(jobId);
+  });
+  jobRequests.set(jobId, request);
+  return request;
 }
 
 function openJob(jobId) {
@@ -448,28 +668,36 @@ function openJob(jobId) {
   currentFile = null;
   fileInput.value = '';
   fileInput.disabled = false;
+  imageInput.disabled = false;
   activeJobId = jobId;
-  if (currentUser) localStorage.setItem(`frameLastJob:${currentUser.id}`, jobId);
+  try { if (currentUser) localStorage.setItem(`frameLastJob:${currentUser.id}`, jobId); }
+  catch { /* Opening a saved conversation does not require browser storage. */ }
   document.querySelectorAll('.conversation').forEach(item => {
     item.classList.toggle('active', item.dataset.jobId === jobId);
   });
   analysisForm.classList.add('session-locked');
   analyzeButton.disabled = true;
+  analyzeButton.textContent = 'Video uploaded';
+  progressWrap.hidden = true;
+  fileRow.hidden = true;
+  formMessage.textContent = '';
+  result.hidden = true;
+  result.replaceChildren();
   openChatButton.hidden = false;
   openChatButton.disabled = true;
   document.querySelector('#intro-title').textContent = 'Your video session';
   document.querySelector('#intro-subtitle').textContent = 'Ask follow-up questions and add reference images to explore your video.';
-  lastJobStatus = null;
+  jobStatusLoading = true;
+  if (!trackedJobs.has(jobId)) trackedJobs.set(jobId, { id: jobId, status: 'loading' });
   chatPanel.hidden = false;
   chatInput.disabled = true;
   chatSend.disabled = true;
   chatMessages.replaceChildren();
   renderedMessageIds = new Set();
-  clearInterval(jobTimer);
   clearInterval(messageTimer);
   messageTimer = null;
-  refreshJob();
-  jobTimer = setInterval(refreshJob, POLL_INTERVAL_MS);
+  refreshJob(jobId);
+  ensureJobPolling();
   loadMessages(jobId).catch(() => {});
 }
 
@@ -525,12 +753,11 @@ function clearVideo() {
   clearPendingImages();
   imageMessage.textContent = '';
   chatPanel.hidden = true;
-  clearInterval(jobTimer);
-  jobTimer = null;
   clearInterval(messageTimer);
   messageTimer = null;
   activeJobId = null;
-  lastJobStatus = null;
+  jobStatusLoading = false;
+  ensureJobPolling();
 }
 
 function startNewConversation() {
@@ -618,6 +845,8 @@ confirmDelete.addEventListener('click', async () => {
       response = { already_removed: true };
     }
     target.row.remove();
+    trackedJobs.delete(target.jobId);
+    ensureJobPolling();
     const preference = `frameLastJob:${currentUser.id}`;
     if (localStorage.getItem(preference) === target.jobId) localStorage.removeItem(preference);
     const wasActive = activeJobId === target.jobId;
@@ -724,8 +953,16 @@ document.querySelector('#sign-out').addEventListener('click', async () => {
   }
   try { await api('/api/auth/logout', { method: 'POST' }); }
   catch (error) { notifyUser(`Could not sign out: ${error.message}`); return; }
+  workspaceGeneration++;
+  trackedJobs.clear();
+  jobRequests.clear();
   clearVideo();
   uploadDrafts.clear();
+  pendingUploadCleanup.clear();
+  clearInterval(cleanupTimer);
+  cleanupTimer = null;
+  uploadFailures.length = 0;
+  uploadErrorDialog.close();
   currentUser = null;
   csrfToken = null;
   loginForm.reset();
@@ -799,7 +1036,9 @@ document.querySelector('#analysis-form').addEventListener('submit', async event 
     return;
   }
   formMessage.textContent = '';
-  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  try {
+    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+  } catch { /* Unsupported browser alerts must not prevent an upload. */ }
   const draft = existingDraft || createDraft(currentFile, entities, document.querySelector('#instructions').value);
   draft.file = currentFile;
   draft.entities = entities;

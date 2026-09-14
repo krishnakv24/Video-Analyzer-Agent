@@ -15,7 +15,7 @@ The backend accepts requests from the browser, owns all database writes, and sav
 | --- | --- | --- |
 | [main.py](../../main.py) | `app`, `lifespan` | Register middleware and routers, serve frontend assets, resume unfinished preparation |
 | [auth.py](../../backend/auth.py) | `protect_api`, `authenticate`, `login` | Session cookies, CSRF, user ownership |
-| [uploads.py](../../backend/uploads.py) | `create_upload`, `append_upload`, `complete_upload`, `lock_for` | Ordered, resumable video transfer |
+| [uploads.py](../../backend/uploads.py) | `create_upload`, `append_upload`, `complete_upload`, `discard_upload`, `lock_for` | Ordered, resumable video transfer and safe discard of uploads without a conversation |
 | [jobs.py](../../backend/jobs.py) | `create_job`, `preprocess_video`, `job_status` | Video-to-conversation mapping and preparation status |
 | [conversation_deletion.py](../../backend/conversation_deletion.py) | `delete_conversation` | Owner-scoped conversation deletion, staged media removal, rollback and purge reporting |
 | [video_metadata.py](../../backend/video_metadata.py) | `inspect_video` | Read the file, calculate SHA-256, optionally obtain duration |
@@ -77,6 +77,7 @@ JSON requests use `Content-Type: application/json`. Video chunks and images use 
 | POST | `/api/uploads` | `filename`, `size` in bytes | **201**: `id`, `filename`, `size`, `offset`, `status`, `chunk_size` |
 | GET | `/api/uploads/{upload_id}` | Upload ID | Same upload fields, with committed offset |
 | PATCH | `/api/uploads/{upload_id}` | Binary chunk; `Upload-Offset` header | `id`, `offset`, `size` |
+| DELETE | `/api/uploads/{upload_id}` | Upload ID; cookie + CSRF | **200**: `status: "deleted"`, `id`, `cleanup_pending`; **409** if any conversation references it |
 | POST | `/api/uploads/{upload_id}/complete` | Upload ID | Upload fields with `status=complete` |
 | GET | `/api/jobs` | Cookie | `jobs[]`: ID, upload ID, filename, status, creation time |
 | POST | `/api/jobs` | `upload_id`, `entities`, `instructions` | **201**: `id`, `session_id`, `upload_id`, `status` |
@@ -93,7 +94,7 @@ JSON requests use `Content-Type: application/json`. Video chunks and images use 
 | POST | `/api/jobs/{job_id}/messages` | `content`, `image_ids[]` | **201**: assistant message plus `user_message` |
 | GET | `/api/jobs/{job_id}/messages` | Conversation ID | `messages[]` ordered by ID, with timestamps and image metadata |
 
-There is no public video-download, cancel-upload, or retry-failed-preparation endpoint. FastAPI also exposes `/docs` and `/openapi.json`; raw streamed bodies do not have typed Pydantic response/request contracts for every field.
+There is no public video-download or retry-failed-preparation endpoint. Upload DELETE discards uploads without a conversation; the UI uses it for failed-upload cleanup rather than an in-flight pause/cancel button. FastAPI also exposes `/docs` and `/openapi.json`; raw streamed bodies do not have typed Pydantic response/request contracts for every field.
 
 <details>
 <summary><strong>Example: create a conversation and use its response</strong></summary>
@@ -167,7 +168,19 @@ A `WeakValueDictionary` holds per-upload `asyncio.Lock` objects. Different video
 - Completion requires the offset and file length to equal the declared size. The file is renamed and the database status is then committed. Repeated completion returns success once the row is `complete`.
 - `jobs.upload_id` has a unique index. Retrying session creation returns 409 if the job already exists; the frontend can find it in the user's job list. Upload records are independent from session creation and may exist without any job.
 
+After any failed session-creation response, the frontend checks the user's job list for that upload ID before treating the operation as a failure. If it finds the saved conversation, it keeps the video. If recovery still fails, the UI resets that draft and requests the guarded discard below; a conversation committed with a lost response remains protected by the backend's 409 check.
+
 There is no client-provided checksum comparison during upload. The later SHA-256 is a fingerprint of the stored bytes, not proof that they match the user's original file.
+
+### Discard an upload after failure
+
+`DELETE /api/uploads/{upload_id}` requires the existing cookie, CSRF, and ownership checks (**401**, **403**, or **404** on failure). It waits for that upload's `lock_for()` lock, shared with PATCH/completion. Within `BEGIN IMMEDIATE`, it rechecks ownership and rejects **409** if *any* job references the upload, regardless of job status. `create_job()` uses the same write transaction boundary, preventing a stale check from creating a job while its video is discarded.
+
+For an upload without a conversation, both `.part` and `.video` paths are validated before either is moved. This applies even to a completed upload that never acquired a job; missing files do not prevent removal of its row. Existing files are renamed to adjacent `.deleted-{operation_id}-{filename}` paths, the upload row is deleted and committed, then staged files are removed. Other uploads, conversations, accounts, and login sessions remain.
+
+Staging or SQL errors roll back and restore the staged files, returning **500**. A failed restoration reports administrator recovery; an abrupt process exit while staging also needs manual recovery. A post-commit purge failure returns **200** with `cleanup_pending: true`, leaving quarantined bytes for administrator cleanup. Normal success returns `cleanup_pending: false`; a repeated delete returns **404**. The response is `{"status":"deleted","id":"<upload UUID>","cleanup_pending":false}`.
+
+The frontend queues best-effort DELETE retries for known upload IDs in `frameUploadCleanup:<userId>:<draftId>` browser records. It retries on the `online` event and every 15 seconds while signed in with the page open, restoring queued records after login. **404** finishes cleanup as already absent; **409** finishes it while preserving the saved conversation; a purge warning also ends automatic retries. This is browser-driven recovery, not a server cleanup scheduler. An upload whose creation response was lost before the browser learned its ID cannot be targeted by this queue.
 
 ### Backend preparation
 
@@ -182,7 +195,7 @@ stateDiagram-v2
     Failed --> [*]
 ```
 
-Startup reschedules records marked `queued` or `preprocessing` with `asyncio.to_thread`; new jobs currently start as `preprocessing`. Ready means local metadata preparation is complete. The browser polls only its selected conversation every 3 seconds and enables chat when it sees `ready`.
+Startup reschedules records marked `queued` or `preprocessing` with `asyncio.to_thread`; new jobs currently start as `preprocessing`. Ready means local metadata preparation is complete. The browser polls tracked preparing conversations every 3 seconds, including background jobs, and enables chat only for the selected ready conversation. Completion notifications are generated from observed state transitions in the frontend; these endpoints do not push notifications.
 
 ## 5. Chat and image flow
 
@@ -397,6 +410,9 @@ classDiagram
 | Wrong offset | 409 with `detail.expected_offset` | Offset reconciliation requires a successful status request |
 | Empty or excessive chunk | 400 / 413 | Server enforces total/chunk bytes; no video decoding validation at this step |
 | Missing/short stored file | 500 | Offset retry cannot reconstruct missing host bytes |
+| Transfer recovery exhausted | Frontend shows a reason popup, clears its draft, and queues upload DELETE | Choose video again starts a fresh ID; server removal may await network/sign-in recovery |
+| Discard upload already linked to a job | 409; all saved conversation data remains | Frontend finishes cleanup and directs the user to refresh saved conversations |
+| Discard staging/SQL or final purge failure | 500 with rollback, or 200 with `cleanup_pending: true` after commit | Abrupt exits/failed restoration/quarantined files can require administrator recovery |
 | Crash between file rename and DB commit | May leave file complete but row uploading | No automatic completion reconciliation for this case |
 | Image DB insert exception | Attempts to remove its just-written image file | Process crashes can still leave orphan files |
 | Delete during preparation | 409; conversation remains | Wait for queued/preprocessing work to finish |
@@ -414,3 +430,5 @@ All records and media must use the same mounted `/data` directory in Docker/Kube
 [cleanup_data.py](../../cleanup_data.py) previews by default. `--execute` deletes session/upload/message/image/login rows while keeping accounts unless `--include-users` is supplied. It then deletes referenced files; the database file/schema remain. It does not scan all orphan media. Database commit precedes file removal, so errors can leave files whose rows are gone. Stop the application before cleanup: this is an operator requirement, not a reliable process-running check enforced by the script. For this deployment, run maintenance with the application stopped and the same host volume mounted.
 
 [test_auth.py](../../tests/test_auth.py) covers account isolation, separate sessions, independent small upload streams, chat/image mapping, deletion authorization, preparation guards, rollback, purge warnings, and an image upload overlapping deletion. [test_cleanup.py](../../tests/test_cleanup.py) covers preview and execution while preserving users. Kubernetes restart, disk exhaustion, process-crash recovery, and large-video throughput remain deployment acceptance work; these documents do not claim those tests have passed.
+
+[test_upload_discard.py](../../tests/test_upload_discard.py) adds subprocess-isolated temporary-data checks for upload discard ownership/CSRF, protected saved jobs, partial/final/missing files, path validation, staging/commit rollback, restore/purge failures, active-chunk locking, and a job-creation race. It does not delete real workspace data.

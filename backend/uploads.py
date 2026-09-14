@@ -1,6 +1,7 @@
 """Uploads for Frame."""
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -8,11 +9,13 @@ from weakref import WeakValueDictionary
 from fastapi import APIRouter, HTTPException, Request
 from .common import checked_id
 from .config import CHUNK_SIZE, UPLOAD_DIR
+from .conversation_deletion import _media_path
 from .db import db_connection
 from .schemas import UploadCreate
 
 router = APIRouter()
 upload_locks = WeakValueDictionary()
+logger = logging.getLogger(__name__)
 
 
 def lock_for(upload_id: str) -> asyncio.Lock:
@@ -58,6 +61,58 @@ def create_upload(payload: UploadCreate, request: Request):
 def upload_status(upload_id: str):
     with db_connection() as db:
         return upload_response(get_upload(db, upload_id))
+
+
+@router.delete("/api/uploads/{upload_id}")
+async def discard_upload(upload_id: str, request: Request):
+    """Discard an upload with no saved conversation, preserving linked videos."""
+    upload_id = checked_id(upload_id)
+    async with lock_for(upload_id):
+        staged = []
+        operation_id = uuid4().hex
+        try:
+            with db_connection() as db:
+                # create_job uses the same write transaction for its existence
+                # check and insert, so neither operation can leave an orphan job.
+                db.execute("BEGIN IMMEDIATE")
+                row = get_upload(db, upload_id)
+                if row["user_id"] != request.state.user_id:
+                    raise HTTPException(404, "Upload not found")
+                if db.execute("SELECT 1 FROM jobs WHERE upload_id = ?", (upload_id,)).fetchone():
+                    raise HTTPException(409, "This upload belongs to a saved conversation and cannot be discarded")
+                paths = [_media_path(UPLOAD_DIR, f"{upload_id}.{suffix}")
+                         for suffix in ("part", "video")]
+                # Validate both candidates before moving either. Renames remain
+                # beside the original files on the same filesystem.
+                for path in paths:
+                    if path.exists():
+                        quarantine = path.with_name(f".deleted-{operation_id}-{path.name}")
+                        path.rename(quarantine)
+                        staged.append((path, quarantine))
+                db.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
+        except Exception as exc:
+            recovery_failed = False
+            for path, quarantine in reversed(staged):
+                try:
+                    quarantine.rename(path)
+                except OSError:
+                    recovery_failed = True
+                    logger.exception("Could not restore upload media %s from %s", path, quarantine)
+            if recovery_failed:
+                raise HTTPException(500, "Discard failed; stored media needs administrator recovery") from exc
+            if isinstance(exc, HTTPException):
+                raise
+            logger.exception("Upload discard rolled back for %s", upload_id)
+            raise HTTPException(500, "Could not discard this upload; no upload data was removed") from exc
+
+        cleanup_pending = False
+        for _, quarantine in staged:
+            try:
+                quarantine.unlink()
+            except OSError:
+                cleanup_pending = True
+                logger.exception("Upload discarded but quarantined media needs cleanup: %s", quarantine)
+        return {"status": "deleted", "id": upload_id, "cleanup_pending": cleanup_pending}
 
 
 @router.patch("/api/uploads/{upload_id}")
