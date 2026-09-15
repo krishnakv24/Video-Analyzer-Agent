@@ -29,6 +29,7 @@ SQLite runs within the backend process. Its database file and the media files li
 | --- | --- |
 | [frontend/](frontend/) | HTML, CSS, JavaScript, and browser assets |
 | [backend/](backend/) | Authentication, uploads, conversations, images, and storage |
+| [agent_service/](agent_service/) | Agent 1 preparation design: filter, caption, face features, and summaries; conversation agent deferred |
 | [main.py](main.py) | FastAPI entry point; serves the frontend and API |
 | [manage_users.py](manage_users.py) | Account administration |
 | [tests/](tests/) | Backend, frontend, and deployment checks |
