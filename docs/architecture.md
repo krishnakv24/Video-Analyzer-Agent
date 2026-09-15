@@ -1,7 +1,7 @@
 # Frame — frontend and backend architecture
 
-> **High-level design (HLD)** · Deployment decision: Docker + Kubernetes on an Ubuntu GPU host, with host storage.
-> The application behavior below exists today. Container packaging and Kubernetes resources described here are the agreed deployment design; they have not yet been added to this repository.
+> **High-level design (HLD)** - Deployment decision: Docker Compose on one Ubuntu host, with persistent host storage.
+> The Docker image packages the current frontend and FastAPI backend. SQLite, videos, and images stay in a host directory mounted into the container. See the [Docker deployment guide](deployment/docker.md) for setup and operation. The Multiagent Service is a future separate container; its implementation is outside this design.
 
 Frame has two responsibilities: let a user upload a video and continue its conversation, and keep that user's files and messages connected to the right session. This document explains those responsibilities and where they run.
 
@@ -11,7 +11,7 @@ Frame has two responsibilities: let a user upload a video and continue its conve
 | [Frontend LLD](design/frontend-design.md) | Screenshots, user interactions, browser states, and UI call chains |
 | [Backend LLD](design/backend-design.md) | API contracts, processing sequences, data mapping, and class diagrams |
 
-**On this page:** [User journey](#1-the-user-journey) · [Architecture](#2-the-architecture) · [Responsibilities](#3-who-does-what) · [Host storage](#4-where-the-data-lives) · [Kubernetes](#5-docker-and-kubernetes-deployment) · [Recovery](#6-restarts-and-recovery) · [Decisions](#7-design-decisions-and-verification)
+**On this page:** [User journey](#1-the-user-journey) · [Architecture](#2-the-architecture) · [Responsibilities](#3-who-does-what) · [Host storage](#4-where-the-data-lives) · [Docker Compose](#5-docker-compose-deployment) · [Recovery](#6-restarts-and-recovery) · [Decisions](#7-design-decisions-and-verification)
 
 ## 1. The user journey
 
@@ -31,40 +31,57 @@ flowchart LR
 
 ## 2. The architecture
 
-Solid arrows show the frontend/backend data path. The dotted arrow reserves a future connection only.
+The supplied Compose configuration runs one application container. Solid arrows show requests or storage access; dotted arrows show management or a future integration.
 
 ```mermaid
 flowchart TB
-    Browser["User's browser<br/>Frontend runs here"]
-    subgraph Cluster["Kubernetes cluster"]
-        Entry["HTTPS entry point<br/>Ingress controller"]
-        Service["Frame Service<br/>ClusterIP"]
-        subgraph Node["Ubuntu GPU host / Kubernetes node"]
-            subgraph Pod["Frame Pod — one application container"]
-                Static["Frontend assets<br/>HTML · CSS · JavaScript"]
-                API["FastAPI backend<br/>Auth · Uploads · Sessions · Chat"]
-                Static --- API
-            end
-            Volume["PersistentVolumeClaim<br/>Mounted at /data"]
-            Host[("Host disk<br/>SQLite · Videos · Images")]
-            Multiagent["Multiagent Service<br/>Separate container · GPU or Claude API"]
+    Admin["Administrator<br/>sudo bash install.sh"]
+    Browser["Browser<br/>Frontend JavaScript runs here"]
+    subgraph Host["Ubuntu host"]
+        Engine["Docker Engine<br/>Runs the application container"]
+        Port["Published host port 8001<br/>Local access by default"]
+        subgraph Project["Compose project: videolens"]
+            App["Application container / port 8000<br/>Frontend files + FastAPI<br/>One CPU process / one Uvicorn worker"]
         end
+        Data[("Host data directory<br/>Example: /srv/videolens/data<br/>SQLite + videos + images")]
     end
-    Browser <-->|"HTTPS: pages, uploads, chat"| Entry
-    Entry --> Service
-    Service --> API
-    API -->|"read and write"| Volume
-    Volume ---|"local PersistentVolume"| Host
-    API -. "future connection" .-> Multiagent
+    Multiagent["Multiagent Service<br/>Future separate container"]
+    Admin -. "load image and apply compose.yaml" .-> Engine
+    Engine -. "start and restart on exit" .-> App
+    Browser --> Port
+    Port --> App
+    App -->|"Read/write through bind mount at /data"| Data
+    App -. "future connection only" .-> Multiagent
     classDef app fill:#e8f3ff,stroke:#2563eb,color:#172554
     classDef storage fill:#e9f7ef,stroke:#258459,color:#14532d
     classDef deferred fill:#f4f4f5,stroke:#71717a,color:#52525b,stroke-dasharray:5 5
-    class Static,API app
-    class Volume,Host storage
+    class App app
+    class Data storage
     class Multiagent deferred
 ```
 
-The frontend and backend remain separate source folders. The application image packages both because [main.py](../main.py) already serves the frontend and `/api` from one FastAPI app. The browser uses one origin for cookies, API requests, and images. The deployment runs on an Ubuntu machine with a GPU. Multiagent design and development will have their own folder later; this document reserves only its separate-container box, with the requested GPU execution or Claude API fallback.
+The frontend and backend remain separate source folders. The application image packages both because [main.py](../main.py) serves the frontend and `/api` from one FastAPI app. SQLite runs inside the backend process. Its database file and the media files live outside the container, in the mounted host directory.
+
+### How the application starts
+
+1. **Prepare the dependency base and package the application.** Build the reusable dependency image with `build_base.sh`. For each release, `package.sh` loads that saved base, copies the current application code into a derived image, and exports the final image with its Compose configuration and installer. Copy the release archive to Ubuntu.
+2. **Install the release.** Extract it and run `sudo bash install.sh`. The installer prepares Docker when needed, creates the data directory and initial `.env`, loads the image, and starts Compose. Reruns preserve existing configuration and data.
+3. **Docker starts FastAPI.** Compose mounts the host directory at `/data`, sets `FRAME_DATA_DIR=/data`, and publishes host port 8001 to container port 8000. The image's default command starts Uvicorn. The backend creates its database and media subdirectories as needed.
+4. **Create an account and open the UI.** Run `docker compose exec app python manage_users.py create admin --admin`, then open `http://localhost:8001/` on the host. Direct LAN access requires an appropriate bind address and host networking configuration; WSL has additional networking requirements.
+
+The [Docker deployment guide](deployment/docker.md) includes the exact commands for WSL and native Ubuntu, image transfer, accounts, and storage. The installer returns after the application passes its health check; Docker keeps running the container after the terminal closes.
+
+### How a video and its conversation are handled
+
+The browser sends video chunks to FastAPI. The backend saves them under `/data/videos` and records upload progress in SQLite. Upload completion finalizes the video; creating a conversation links that upload to a unique session. Backend metadata preparation runs in the same application process, and the browser polls for its status. Follow-up messages and image records are associated with the session, with image bytes stored under `/data/images`. Docker runs the application; FastAPI implements this user workflow.
+
+### What happens during recovery
+
+Compose configures `restart: unless-stopped` so Docker can restart the container after its process exits, unless it was deliberately stopped. A rebuilt or recreated container uses the same configured host directory. Startup restarts queued or unfinished metadata preparation from the beginning. In-flight requests may need retrying; upload finalization still has a crash window between renaming the video and committing its database status. Persistent files alone do not guarantee automatic recovery of every operation.
+
+Application updates replace the single app container and cause a short outage. A host outage requires restoring that host or recovering onto another machine from backup. Automated off-host backups and power-loss recovery checks remain outstanding; see [restarts and recovery](#6-restarts-and-recovery).
+
+Multiagent design and development will have their own folder later. This document reserves its separate-service box only. GPU execution or external API selection belongs to that future service.
 
 ## 3. Who does what
 
@@ -86,12 +103,12 @@ The browser handles presentation and transfer. File validation, storage, metadat
 
 The database is currently **SQLite**, so “database on the host” means its database file stays on the host disk. There is no separate database server in this design. Mount the entire data directory into the application container; SQLite must also be able to write its journal files there.
 
-| Data | Example path on the Kubernetes host | Path used by FastAPI |
+| Data | Example path on the Docker host | Path used by FastAPI |
 | --- | --- | --- |
-| Database and journals | `/srv/frame/data/frame.sqlite3` and related files | `/data/frame.sqlite3` |
-| Video being uploaded | `/srv/frame/data/videos/{upload_id}.part` | `/data/videos/{upload_id}.part` |
-| Completed video | `/srv/frame/data/videos/{upload_id}.video` | `/data/videos/{upload_id}.video` |
-| Chat image | `/srv/frame/data/images/{session_id}/{stored_name}` | `/data/images/{session_id}/{stored_name}` |
+| Database and journals | `/srv/videolens/data/frame.sqlite3` and related files | `/data/frame.sqlite3` |
+| Video being uploaded | `/srv/videolens/data/videos/{upload_id}.part` | `/data/videos/{upload_id}.part` |
+| Completed video | `/srv/videolens/data/videos/{upload_id}.video` | `/data/videos/{upload_id}.video` |
+| Chat image | `/srv/videolens/data/images/{session_id}/{stored_name}` | `/data/images/{session_id}/{stored_name}` |
 
 Set **`FRAME_DATA_DIR=/data`** in the application container. The host path above is a deployment example; the existing local default is the repository's `data/` directory. Preserve the current directory contents when moving to the mounted path. Do not bake user data into the Docker image or use the container's writable layer for it.
 
@@ -110,30 +127,34 @@ IDs and metadata live in SQLite; the video and image bytes live in files. See th
 
 A user can delete one saved conversation from its sidebar menu. This removes its video, all registered images (including images uploaded but not attached to a message), messages, and upload/session records. Accounts, login sessions, and other conversations remain. Preparation must finish before deletion is allowed. The backend stages media before committing the database deletion, then removes the staged files; [deletion recovery details](design/backend-design.md#delete-one-conversation) cover rollback and incomplete file cleanup.
 
-## 5. Docker and Kubernetes deployment
+## 5. Docker Compose deployment
 
-These are deployment settings to implement, not a report of resources currently running.
+Use the [Docker deployment guide](deployment/docker.md) for the current deployment. [Dockerfile.base](../Dockerfile.base) defines the reusable Ubuntu/Python/library image. [Dockerfile](../Dockerfile) adds current application files and the startup command to that base. The repository also supplies [compose.yaml](../compose.yaml), [.dockerignore](../.dockerignore), and [.env.example](../.env.example). The same final image runs in WSL Ubuntu for testing and on a native Ubuntu server.
 
-| Resource | Selected design | Reason |
+The host needs **Docker Engine, the Compose plugin, and a writable data directory**. Python, FastAPI dependencies, SQLite support, and FFmpeg are packaged in the image. The backend creates the SQLite file and the `videos/` and `images/` directories under `/data`. [setup.sh](../setup.sh) remains a local Python development setup script.
+
+[build_base.sh](../build_base.sh) exports the dependency base separately. [package.sh](../package.sh) loads that archive and adds current code without installing libraries. A changed dependency list or base Dockerfile requires a new base build. The final archive includes the base layers, so the server only needs that final release. Run its included [install.sh](../install.sh) to prepare Docker and host storage, create the initial configuration, load the image, and start the application. Existing configuration and host data are preserved on reruns. See the [package workflow](deployment/docker.md#package-in-wsl-and-install-on-ubuntu).
+
+| Resource | Current configuration | Reason |
 | --- | --- | --- |
-| Application image | Python runtime, requirements, `main.py`, `backend/`, `frontend/`, `manage_users.py`, `cleanup_data.py`; include `ffprobe` for duration | Package the application, maintenance commands, and runtime tools |
-| Application process | `uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1`; no `--reload` | Upload locks and preparation ownership currently belong to one process |
-| Compute host | Ubuntu Kubernetes node with persistent host disk and GPU hardware | Frontend/backend run on CPU; they do not reserve GPU devices or need CUDA for current behavior |
-| Deployment | One replica; `Recreate` update strategy | Avoid old/new application pods overlapping during normal upgrades; upgrades cause a brief outage |
-| Service | ClusterIP targeting port 8000 | Stable route to the application pod |
-| HTTPS entry | Ingress and an installed controller; same hostname for `/` and `/api` | Serve the UI, cookies, and API through one origin |
-| Data volume | Static **local PersistentVolume**, matching PVC, mounted at `/data` | Keep the database, videos, and images on the selected host |
-| Volume placement | PV `nodeAffinity`; StorageClass `kubernetes.io/no-provisioner` with `WaitForFirstConsumer` | Schedule the pod where its host data exists |
-| Data lifecycle | PV reclaim policy `Retain`; host-directory permissions for the application user | Separate application replacement from data removal |
-| Availability checks | Use `/api/health` for basic process checks; add storage-aware readiness before release | Current health response does not test database or disk access |
+| Application image | Ubuntu 24.04, Python 3.12, requirements, frontend/backend code, maintenance scripts, and FFmpeg/`ffprobe` | Package the application and runtime tools together |
+| Application process | Uvicorn on port 8000 with one worker and no `--reload` | Upload locks and preparation ownership belong to one process |
+| Compose project | `videolens`, with one service named `app` | Start, stop, inspect, and update the application using Compose |
+| Network entry | Host `127.0.0.1:8001` maps to container port 8000 by default | Serve the UI and `/api` on one origin; make LAN access an explicit configuration |
+| Data storage | Pre-existing `HOST_DATA_DIR` bind-mounted read/write at `/data` | Keep SQLite, journals, videos, and images on the host across container replacement |
+| File permissions | Non-root `APP_UID:APP_GID`, matching the host data owner | Allow writes to application data without running the app as root |
+| Runtime restrictions | Read-only container root filesystem, writable `/tmp`, dropped capabilities | Keep runtime writes in the configured data and temporary locations |
+| Process recovery | `restart: unless-stopped`, with a two-minute shutdown grace period | Restart an exited container while allowing deliberate stops |
+| Health check | `/api/health` queried by Docker | Show process responsiveness; this does not test storage or restart a merely unhealthy process |
+| Logs | Docker JSON logs with rotation | Inspect app output using `docker compose logs` and limit log growth |
 
-Local PVs require node affinity, and delayed binding allows Kubernetes to consider the pod's placement. A local volume remains tied to its node; Kubernetes does not copy it to another host. [Kubernetes local volumes](https://kubernetes.io/docs/concepts/storage/volumes/#local), [volume binding](https://kubernetes.io/docs/concepts/storage/storage-classes/#volume-binding-mode).
+A bind mount connects the host directory directly to the application. Container removal preserves that directory, but application file deletions still affect the host files. Keep one backend instance using it; neither Docker nor the mount enforces an application lock. [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/).
 
-`Recreate` stops old pods before replacements during a deployment update. It is not a distributed lock: do not manually run another backend or force-delete a pod whose process may still be writing. ReadWriteOnce also does not mean “one application writer.” [Kubernetes deployment strategy](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#recreate-deployment), [volume access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes).
+Docker must be running for the restart policy to work. Enable its service at boot on the Ubuntu server; shutting down WSL stops the test environment. A stopped or removed container needs an explicit start or Compose up operation as appropriate. [Docker restart policies](https://docs.docker.com/engine/containers/start-containers-automatically/).
 
-Configure the chosen ingress to accept **at least 20 MiB image bodies** and 8 MiB video chunks, with timeouts for each request and appropriate request buffering. A 24-hour video is many requests, not one day-long request. Trust forwarded HTTPS headers only from the ingress so FastAPI can set secure cookies correctly. Keep media routes behind FastAPI's ownership checks.
+For HTTPS deployment, configure a reverse proxy with the same hostname for `/` and `/api`, restrict access to the app port, and accept **at least 20 MiB image bodies** and 8 MiB video chunks. Configure timeouts for each request and appropriate request buffering. A 24-hour video uses many requests. Trust forwarded HTTPS headers only from the proxy so FastAPI can set secure cookies correctly. Keep media routes behind FastAPI's ownership checks. Proxy and TLS configuration remain deployment work.
 
-**Host means the Ubuntu Kubernetes node filesystem.** `/srv/frame/data` is a Linux deployment path; the current Windows project directory is the development workspace. Exact Ubuntu version, node name, host directory, ingress implementation, disk capacity, and resource requests remain environment configuration. GPU allocation and Claude credentials belong to the deferred service configuration; they are not required to run the current frontend/backend.
+**Host means the Ubuntu Docker host filesystem.** `/srv/videolens/data` is an example server path; the existing repository `data/` directory is the local development default. Verify disk capacity and permissions before migration. The current frontend/backend use CPU and require no GPU runtime or external model credentials.
 
 ## 6. Restarts and recovery
 
@@ -141,8 +162,8 @@ Configure the chosen ingress to accept **at least 20 MiB image bodies** and 8 Mi
 | --- | --- | --- |
 | Browser refresh | Saved database records, received video bytes, and locally saved draft details | Reopen a session, or select its Resume upload draft and reselect the original video |
 | Application container restart | Data on the mounted host directory | Chunk recovery needs a successful status query. An interrupted-page draft can resume; a reported upload failure instead offers a fresh upload and queues cleanup. Startup reschedules unfinished metadata preparation |
-| Container image / pod replacement | Same host data if the PVC is retained | Reattach the existing claim and keep the single-writer rule |
-| Storage host unavailable | Files remain tied to that host | Restore the host or recover from backup; automatic cross-node failover is not provided |
+| Container recreation or image update | Same host files when `HOST_DATA_DIR` is preserved | Reuse that directory and keep one backend instance writing to it |
+| Storage host unavailable | Files remain tied to that host | Restore the host or recover from backup; automatic failover to another host is not provided |
 | Manual cleanup | Accounts stay unless explicitly included | Stop the application, preview cleanup, then execute only the intended reset |
 | Delete one conversation | Accounts and other conversations remain | Confirm in the sidebar menu; a file-cleanup warning requires administrator attention |
 | Failed-upload cleanup cannot reach the server | Its known upload ID remains queued in browser storage when available | Retry on network recovery and every 15 seconds while signed in with the page open; reload/sign-in restores the cleanup queue |
@@ -156,11 +177,11 @@ Upload-saved and preparing-to-ready alerts are separate events. The frontend sup
 | Decision | Outcome |
 | --- | --- |
 | D1 — Frontend and backend own this design | Three focused documents: HLD, frontend LLD, backend LLD |
-| D2 — Docker images run on Kubernetes | Single application pod serves the existing frontend and backend |
-| D3 — Database and media stay on the host | SQLite and files persist through a local PV/PVC mount |
-| D4 — Keep one backend writer | One replica, one Uvicorn worker, controlled replacement |
+| D2 — Deploy with Docker Compose | One application container serves the existing frontend and backend |
+| D3 — Database and media stay on the host | SQLite and files persist through a host directory mounted at `/data` |
+| D4 — Keep one backend writer | One app container, one Uvicorn worker, controlled replacement |
 | D5 — Keep future scope small | One Multiagent Service box; its implementation and design are deferred |
 
-Before deploying, verify: the same user can reopen sessions after a pod replacement; two uploads can advance independently; ingress accepts the configured chunk/image sizes; cross-user media is denied; interrupted uploads resume; and a backed-up database plus media directory can be restored together. Current tests cover small concurrent transfers, ownership, chat/image mapping, and cleanup, not Kubernetes or 24-hour-file performance.
+Before deploying, verify: the same user can reopen sessions after container recreation; two uploads can advance independently; the chosen reverse proxy accepts the configured chunk/image sizes; cross-user media is denied; interrupted uploads resume; and a backed-up database plus media directory can be restored together. Current tests cover small concurrent transfers, ownership, chat/image mapping, cleanup, and Docker container recreation. Real 24-hour-file performance, native-server networking, and power-loss recovery still require deployment-specific validation.
 
 For implementation details, continue with the [frontend LLD](design/frontend-design.md) or [backend LLD](design/backend-design.md).

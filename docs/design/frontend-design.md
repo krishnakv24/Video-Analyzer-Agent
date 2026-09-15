@@ -135,7 +135,7 @@ The frontend uses plain HTML, CSS, and JavaScript. There is no frontend framewor
 
 The page uses relative `/api/...` URLs and must be served through the application origin. Opening `index.html` with a `file://` URL does not supply the backend.
 
-The deployment design keeps these static files in the FastAPI application container. On the planned Ubuntu Kubernetes host, a Service and Ingress expose the page and its API under the same origin. Host storage and the deployment topology are specified in the [HLD](../architecture.md); this paragraph describes the target boundary, not existing deployment manifests.
+The [Docker Compose deployment](../deployment/docker.md) runs these static files and FastAPI in one application container on WSL or Ubuntu, serving the page and API on the same origin. One Uvicorn worker uses a host directory bind-mounted at `/data` for SQLite, videos, and images. HTTPS reverse-proxy configuration depends on the deployment hostname and proxy. Host storage and the deployment topology are specified in the [HLD](../architecture.md#5-docker-compose-deployment).
 
 ### 3.2 State ownership and lifetime
 

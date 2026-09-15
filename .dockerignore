@@ -1,0 +1,20 @@
+# Only application source enters the build context. Large recordings, local
+# databases, virtual environments, Git history, and credentials stay on the host.
+**
+!Dockerfile
+!Dockerfile.base
+!requirements.txt
+!main.py
+!manage_users.py
+!cleanup_data.py
+!backend/
+!backend/**
+!frontend/
+!frontend/**
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.env
+**/.env.*
+**/node_modules/
+frontend/README.md

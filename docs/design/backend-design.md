@@ -1,7 +1,7 @@
 # Backend design — APIs, storage, and session mapping
 
 > **Low-level design (LLD)** · Describes the current Python implementation.
-> Deployment target: one FastAPI application container on the Ubuntu Kubernetes host, with `/data` mounted from host storage.
+> Deployment target: one FastAPI application container managed by Docker Compose on Ubuntu, with `/data` bind-mounted from host storage.
 
 [Architecture overview](../architecture.md) · [Frontend screens and interactions](frontend-design.md)
 
@@ -47,7 +47,7 @@ flowchart LR
 | Setting | Current behavior |
 | --- | --- |
 | Cookie | `frame_session`, HttpOnly, SameSite Strict, path `/` |
-| HTTPS | Secure cookie when FastAPI sees the request scheme as HTTPS; ingress forwarding must be configured correctly |
+| HTTPS | Secure cookie when FastAPI sees the request scheme as HTTPS; reverse-proxy forwarding must be configured correctly |
 | Lifetime | 12-hour server expiry without remember-me; 7 days with remember-me |
 | Browser storage | Identity and CSRF held in memory; upload/session selection IDs may be in local storage |
 | Public endpoints | Health and login; `/api/me` authenticates directly despite its middleware exemption |
@@ -420,15 +420,16 @@ classDiagram
 | Deletion final purge failure | 200 with `cleanup_pending: true`; rows are already deleted | Quarantined media needs manual cleanup; no automatic purge retry |
 | Chat response lost | Database may already contain both messages | No request idempotency key; blindly retrying can duplicate text or reject already-attached images |
 | Many active sessions | Lists and message histories are returned in full | No pagination or measured load capacity |
-| Pod restart | Host data survives; unfinished preparation is rescheduled | No cross-process locks; deployment must retain one backend writer |
-| Host loss | PVC identifies the local host storage | Availability requires recovery of that host or a backup |
+| Container restart | Saved host data remains; queued/preprocessing jobs are rescheduled on startup | No cross-process locks; retain one backend writer, and account for the crash windows above |
+| Container marked unhealthy | Docker reports the HTTP health-check failure | The restart policy does not restart a running container solely because it is unhealthy |
+| Host loss | Database and media reside in the host bind mount | Availability requires recovery of that host or a backup; no data replication is configured |
 
-All records and media must use the same mounted `/data` directory in Docker/Kubernetes. SQLite connections use a 30-second lock timeout; WAL is not enabled in this code. The [deployment HLD](../architecture.md#5-docker-and-kubernetes-deployment) records the one-replica, one-worker configuration and host-volume placement.
+All records and media must use the same bind-mounted `/data` directory in Docker Compose. SQLite connections use a 30-second lock timeout; WAL is not enabled in this code. The [deployment HLD](../architecture.md#5-docker-compose-deployment) records the one-container, one-worker configuration and host-storage placement.
 
 ### Maintenance and verification
 
 [cleanup_data.py](../../cleanup_data.py) previews by default. `--execute` deletes session/upload/message/image/login rows while keeping accounts unless `--include-users` is supplied. It then deletes referenced files; the database file/schema remain. It does not scan all orphan media. Database commit precedes file removal, so errors can leave files whose rows are gone. Stop the application before cleanup: this is an operator requirement, not a reliable process-running check enforced by the script. For this deployment, run maintenance with the application stopped and the same host volume mounted.
 
-[test_auth.py](../../tests/test_auth.py) covers account isolation, separate sessions, independent small upload streams, chat/image mapping, deletion authorization, preparation guards, rollback, purge warnings, and an image upload overlapping deletion. [test_cleanup.py](../../tests/test_cleanup.py) covers preview and execution while preserving users. Kubernetes restart, disk exhaustion, process-crash recovery, and large-video throughput remain deployment acceptance work; these documents do not claim those tests have passed.
+[test_auth.py](../../tests/test_auth.py) covers account isolation, separate sessions, independent small upload streams, chat/image mapping, deletion authorization, preparation guards, rollback, purge warnings, and an image upload overlapping deletion. [test_cleanup.py](../../tests/test_cleanup.py) covers preview and execution while preserving users. The [Docker smoke test](../../tests/docker_smoke.py) verified persistence after full container recreation in WSL. Disk exhaustion, abrupt process-crash recovery, and large-video throughput remain deployment acceptance work; these documents do not claim those tests have passed.
 
 [test_upload_discard.py](../../tests/test_upload_discard.py) adds subprocess-isolated temporary-data checks for upload discard ownership/CSRF, protected saved jobs, partial/final/missing files, path validation, staging/commit rollback, restore/purge failures, active-chunk locking, and a job-creation race. It does not delete real workspace data.

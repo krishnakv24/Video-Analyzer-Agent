@@ -2,9 +2,11 @@
 
 VideoLens is the browser-facing name. Existing internal names such as `frame_session`, `frameUploadDraft`, and `FRAME_DATA_DIR` remain unchanged so current login, resume, and storage data stay compatible.
 
-Start with the [architecture HLD](../docs/architecture.md) for the Ubuntu, Docker, Kubernetes, and host-storage design. The [frontend LLD](../docs/design/frontend-design.md) covers screens, screenshots, and interactions; the [backend LLD](../docs/design/backend-design.md) covers APIs, session mapping, and class diagrams.
+Start with the [architecture HLD](../docs/architecture.md) for the Ubuntu, Docker Compose, and host-storage design. The [frontend LLD](../docs/design/frontend-design.md) covers screens, screenshots, and interactions; the [backend LLD](../docs/design/backend-design.md) covers APIs, session mapping, and class diagrams.
 
-Run from the repository root:
+For Docker Compose on WSL or Ubuntu, use the [Docker deployment guide](../docs/deployment/docker.md). The container includes Python dependencies and `ffprobe`; it serves this frontend and the backend together and stores data in the configured host directory. No local virtual environment is needed for Docker.
+
+For local development without containers, run from the repository root:
 
 ```powershell
 python -m venv .venv
@@ -54,11 +56,11 @@ main.py             FastAPI app entry point
 manage_users.py     Local account administration command
 ```
 
-The algorithm and agent system is a **separate, internally reachable FastAPI project**. This repository contains the browser and the user-facing backend only. `backend/video_metadata.py` handles local upload integrity and optional duration extraction; it is not the detection algorithm. The user-facing backend owns accounts, sessions, uploads, and chat. It should send a session ID, selected entities, prompt, and a **shared video object key** to the internal algorithm service. The algorithm service should read the video from shared storage, run detection and agent logic, and return status, text, and result-image object keys. The user-facing backend then saves that response against the session and serves the images to the signed-in user. Do not send a 24-hour video's bytes inside a JSON request or assume that a local path on this server exists in the other project.
+The planned algorithm and agent system will be a **separate, internally reachable FastAPI project**. This repository contains the browser and the user-facing backend only. `backend/video_metadata.py` handles local upload integrity and optional duration extraction; it is not the detection algorithm. The user-facing backend owns accounts, sessions, uploads, and chat. It should send a session ID, selected entities, prompt, and a **shared video object key** to the internal algorithm service. The algorithm service should read the video from shared storage, run detection and agent logic, and return status, text, and result-image object keys. The user-facing backend would then save that response against the session and serve the images to the signed-in user. Do not send a 24-hour video's bytes inside a JSON request or assume that a local path on this server exists in the other project.
 
 The service-to-service request format, authentication, and shared storage location still need to be agreed with the algorithm project's actual API. Agent integration is deferred; long-running video work belongs in a worker rather than an HTTP request.
 
-See [docs/architecture.md](../docs/architecture.md) for the separate-service boundary and a proposed internal request format.
+See [docs/architecture.md](../docs/architecture.md) for the deployment topology and the reserved Multiagent Service boundary.
 
 The browser sends video data in 8 MiB chunks. To continue an interrupted upload, select its **Resume upload** draft in the sidebar, reselect the original video if needed, and resume that draft. Its filename, size, and last-modified time must match the saved selection; these checks do not prove content equality. FastAPI stores file bytes in `data/videos/` and upload/job metadata in `data/frame.sqlite3`. Set `FRAME_DATA_DIR` to move these files to a disk with enough free space. `data/` is ignored by Git. The configured maximum is 250 GiB per video; adjust `MAX_VIDEO_SIZE` in `backend/config.py` for your deployment.
 
@@ -106,3 +108,5 @@ Run that command only after choosing the correct owner. It claims every currentl
 To clear local sessions, uploads, messages, images, and login sessions, stop the API and preview the cleanup with `python cleanup_data.py`. Run `python cleanup_data.py --execute` to apply it. User accounts remain available; add `--include-users` only if you also want to remove every account. The script removes media files referenced by database rows, so take a database and media backup first if the data matters.
 
 This SQLite plus local disk configuration is suitable for one server process and development. Do not run multiple Uvicorn workers against this upload implementation: its upload lock is process-local. For production with multiple servers, store video bytes in object storage through multipart upload and use PostgreSQL for upload records, jobs, users, and detection metadata. Give workers the object key or video ID; do not put 24-hour video bytes in the database or agent prompt.
+
+Docker Compose is also the Ubuntu server deployment path. Keep one application container and one Uvicorn worker, with SQLite, videos, and images in the same host directory mounted at `/data`; see the [deployment details](../docs/architecture.md#5-docker-compose-deployment).

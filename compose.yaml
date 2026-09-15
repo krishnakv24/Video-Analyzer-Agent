@@ -1,0 +1,35 @@
+name: videolens
+
+services:
+  app:
+    image: ${VIDEOLENS_IMAGE:-videolens:local}
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-videolens-base:1.0.0}
+    init: true
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      FRAME_DATA_DIR: /data
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8001}:8000"
+    volumes:
+      - type: bind
+        source: ${HOST_DATA_DIR:?Set HOST_DATA_DIR to an existing host data directory}
+        target: /data
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+    stop_grace_period: 2m
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
