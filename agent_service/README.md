@@ -13,18 +13,20 @@ Video A / Session A + Video B / Session B + further videos
   -> Validate plan; Model Manager loads/reuses approved CPU models
   -> FFmpeg + optional MOG2 + YOLOX-Nano selected-entity filtering
   -> Retained frames only
-       -> YuNet face detection + SFace embeddings
+       -> User's tested ONNX face detector + feature extractor / CPU
        -> SmolVLM-500M captions + MiniLM text embeddings
   -> Join per-session results; persist in MinIO / Chroma
   -> Same GPU Brain: section and overall summaries
   -> Publish evidence and notify that session's completion
 ```
 
-The proposed Brain is Qwen3-4B-Instruct-2507 through llama.cpp with a validated quantized GPU configuration. CPU and GPU model choices are an evaluation baseline; their fit and throughput have not been measured here.
+The proposed Brain is Qwen3-4B-Instruct-2507 through llama.cpp on GPU. The user confirmed ONNX versions of their [tested face models](https://github.com/krishnakv24/pedestrian_analysis_triton_inference_server/tree/7d466cd03d9296f75a430d9ec11291857dabebfe/model_repository); use those with ONNX Runtime on CPU. Exact ONNX artifacts and their tested input/output contracts will be recorded during integration. See the [face-model reuse decision](docs/architecture.md#existing-face-models-onnx-reuse).
 
 For People and Cars, qualifying frames containing either category are retained. With Cars-only selection, face processing still runs on every retained car frame. Rejected frames create no downstream evidence; the source remains saved.
 
-The Model Manager loads approved local artifacts once, reuses them across sessions, and evicts only idle CPU models. The Brain stays resident on GPU. Each session keeps its own plan, decoder state, frame IDs, progress and summaries.
+The Model Manager loads approved CPU models once, reuses them across sessions, and evicts only idle eligible models. The GPU remains reserved for the Brain. Each session keeps its own plan, decoder state, frame IDs, progress and summaries.
+
+For later image queries, faces use direct lookup against the session's precomputed face vectors. For cars and animals, a vision-language model describes the reference image; captions, timestamped summaries and entity records shortlist retained frames before object-crop matching. Attributes help retrieve candidates but do not prove an exact match. See the [future matching policy](docs/architecture.md#future-matching-direct-face-lookup-and-object-candidate-search); query execution remains deferred.
 
 ## Design documents
 
